@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA JSON Probe (test only)
 // @namespace    ka-json-probe
-// @version      0.1.0
+// @version      0.1.1
 // @description  TEST ONLY. Checks whether the current KA can be read as the original Salesforce record (JSON) instead of from the page HTML. Read-only: never writes to Salesforce or Drive.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -14,7 +14,7 @@
 
 /*
  * Tries 3 read-only ways to get the KA record as JSON:
- *   A. Lightning's own internal channel (Aura "getRecordWithLayouts") — the
+ *   A. Lightning's own internal channel (Aura "getRecordWithLayouts") - the
  *      same call the page makes to draw the record.
  *   B. UI API on the Lightning domain (/services/data/.../ui-api/records).
  *   C. REST API on the my.salesforce.com domain (/sobjects/Knowledge__kav).
@@ -37,7 +37,7 @@
     return m ? m[1] : null;
   }
 
-  // ─── Method A: Aura (Lightning internal channel) ─────────────────────────
+  // --- Method A: Aura (Lightning internal channel) -------------------------
 
   function auraToken(A) {
     const cs = A && A.clientService;
@@ -84,7 +84,7 @@
     const action = (json.actions || [])[0] || {};
     if (action.state !== 'SUCCESS') {
       const err = (action.error || [])[0];
-      return { ok: false, why: 'Salesforce said: ' + (action.state || 'no state') + (err && err.message ? ' — ' + err.message : '') };
+      return { ok: false, why: 'Salesforce said: ' + (action.state || 'no state') + (err && err.message ? ' - ' + err.message : '') };
     }
     const rv = action.returnValue || {};
     const rec = rv.record || (rv.records && rv.records[id]) || null;
@@ -92,7 +92,7 @@
     return { ok: true, fields: flattenUiFields(rec.fields), raw: rv };
   }
 
-  // ─── Method B: UI API on the Lightning domain ───────────────────────────
+  // --- Method B: UI API on the Lightning domain ---------------------------
 
   async function tryUiApi(id) {
     const url = '/services/data/' + API_VERSION + '/ui-api/records/' + id + '?layoutTypes=Full&modes=View';
@@ -105,7 +105,7 @@
     return { ok: true, fields: flattenUiFields(json.fields), raw: json };
   }
 
-  // ─── Method C: REST API on the my.salesforce.com domain ─────────────────
+  // --- Method C: REST API on the my.salesforce.com domain -----------------
 
   function tryRest(id) {
     return new Promise((resolve) => {
@@ -130,7 +130,7 @@
     });
   }
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────
+  // --- Helpers -------------------------------------------------------------
 
   function flattenUiFields(fields) {
     const out = {};
@@ -143,10 +143,15 @@
 
   function shortErr(text) {
     try {
-      const j = JSON.parse(text);
-      const e = Array.isArray(j) ? j[0] : j;
-      return e && (e.errorCode || e.message) ? '— ' + (e.errorCode || '') + ' ' + (e.message || '') : '';
-    } catch (e) { return ''; }
+      const parsed = JSON.parse(text);
+      const first = Array.isArray(parsed) ? parsed[0] : parsed;
+      if (first && (first.errorCode || first.message)) {
+        return '- ' + (first.errorCode || '') + ' ' + (first.message || '');
+      }
+      return '';
+    } catch (err) {
+      return '';
+    }
   }
 
   function fieldSummary(fields) {
@@ -165,12 +170,12 @@
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
-  // ─── Run ─────────────────────────────────────────────────────────────────
+  // --- Run -----------------------------------------------------------------
 
   async function runProbe() {
     const id = recordId();
-    const box = showBox('<b>Testing…</b>');
-    if (!id) { box.innerHTML = '❌ Open a KA first (the URL must contain Knowledge__kav).'; return; }
+    const box = showBox('<b>Testing...</b>');
+    if (!id) { box.innerHTML = '\u274C Open a KA first (the URL must contain Knowledge__kav).'; return; }
 
     const methods = [
       ['A. Lightning internal channel', tryAura],
@@ -188,17 +193,17 @@
     _lastJson = winner ? { recordId: id, method: winner.label, fields: winner.fields } : null;
 
     let html = '<div style="font-weight:700;font-size:14px;margin-bottom:8px">' +
-      (winner ? '✅ It works! The KA can be read as JSON.' : '❌ Blocked: the KA cannot be read as JSON.') + '</div>';
+      (winner ? '\u2705 It works! The KA can be read as JSON.' : '\u274C Blocked: the KA cannot be read as JSON.') + '</div>';
     for (const r of results) {
-      html += '<div style="margin:4px 0">' + (r.ok ? '✅ ' : '❌ ') + '<b>' + esc(r.label) + '</b>' +
-        (r.ok ? ' — ' + Object.keys(r.fields).length + ' fields' : '<br><span style="color:#8A8D91">' + esc(r.why) + '</span>') +
+      html += '<div style="margin:4px 0">' + (r.ok ? '\u2705 ' : '\u274C ') + '<b>' + esc(r.label) + '</b>' +
+        (r.ok ? ' - ' + Object.keys(r.fields).length + ' fields' : '<br><span style="color:#8A8D91">' + esc(r.why) + '</span>') +
         '</div>';
     }
     if (winner) {
       const rows = fieldSummary(winner.fields);
-      html += '<div style="margin-top:8px;font-weight:600">Fields with content (📄 = has formatting/HTML):</div>' +
+      html += '<div style="margin-top:8px;font-weight:600">Fields with content (\uD83D\uDCC4 = has formatting/HTML):</div>' +
         '<div style="max-height:180px;overflow:auto;font-size:11px;border:1px solid #E8E9EB;border-radius:6px;padding:6px">' +
-        rows.map(r => (r.html ? '📄 ' : '▫️ ') + esc(r.name) + ' — ' + r.size + ' chars').join('<br>') + '</div>';
+        rows.map(r => (r.html ? '\uD83D\uDCC4 ' : '\u25AB\uFE0F ') + esc(r.name) + ' - ' + r.size + ' chars').join('<br>') + '</div>';
     }
     html += '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
       '<button id="kjp-copy" class="kjp-btn">Copy result</button>' +
@@ -206,11 +211,11 @@
       '<button id="kjp-close" class="kjp-btn kjp-grey">Close</button></div>';
     box.innerHTML = html;
 
-    const summaryText = 'KA JSON Probe v0.1.0 — record ' + id + '\n' +
-      results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + r.label + (r.ok ? ' (' + Object.keys(r.fields).length + ' fields)' : ' — ' + r.why)).join('\n') +
+    const summaryText = 'KA JSON Probe v0.1.1 - record ' + id + '\n' +
+      results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + r.label + (r.ok ? ' (' + Object.keys(r.fields).length + ' fields)' : ' - ' + r.why)).join('\n') +
       (winner ? '\n\nFields:\n' + fieldSummary(winner.fields).map(r => (r.html ? '[html] ' : '       ') + r.name + ' ' + r.size).join('\n') : '');
     document.getElementById('kjp-copy').onclick = async () => {
-      try { await navigator.clipboard.writeText(summaryText); document.getElementById('kjp-copy').textContent = 'Copied ✓'; }
+      try { await navigator.clipboard.writeText(summaryText); document.getElementById('kjp-copy').textContent = 'Copied \u2713'; }
       catch (e) { window.prompt('Copy this:', summaryText); }
     };
     const dl = document.getElementById('kjp-dl');
@@ -225,7 +230,7 @@
     document.getElementById('kjp-close').onclick = () => { document.getElementById('kjp-box').remove(); };
   }
 
-  // ─── UI (bottom-LEFT so it never covers the KA Refresh buttons) ─────────
+  // --- UI (bottom-LEFT so it never covers the KA Refresh buttons) ---------
 
   GM_addStyle(`
     #kjp-btn { position: fixed; bottom: 20px; left: 20px; z-index: 99999; padding: 10px 16px;
@@ -254,7 +259,7 @@
     if (document.getElementById('kjp-btn')) return;
     const btn = document.createElement('button');
     btn.id = 'kjp-btn';
-    btn.textContent = '🧪 Test JSON';
+    btn.textContent = '\uD83E\uDDEA Test JSON';
     btn.onclick = runProbe;
     document.body.appendChild(btn);
   }
