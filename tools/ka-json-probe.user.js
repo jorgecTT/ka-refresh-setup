@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         KA JSON Probe (test only)
 // @namespace    ka-json-probe
-// @version      0.1.1
+// @version      0.1.2
 // @description  TEST ONLY. Checks whether the current KA can be read as the original Salesforce record (JSON) instead of from the page HTML. Read-only: never writes to Salesforce or Drive.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        unsafeWindow
+// @grant        GM_registerMenuCommand
 // @connect      thumbtack.my.salesforce.com
 // @run-at       document-idle
 // ==/UserScript==
@@ -211,7 +212,7 @@
       '<button id="kjp-close" class="kjp-btn kjp-grey">Close</button></div>';
     box.innerHTML = html;
 
-    const summaryText = 'KA JSON Probe v0.1.1 - record ' + id + '\n' +
+    const summaryText = 'KA JSON Probe v0.1.2 - record ' + id + '\n' +
       results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + r.label + (r.ok ? ' (' + Object.keys(r.fields).length + ' fields)' : ' - ' + r.why)).join('\n') +
       (winner ? '\n\nFields:\n' + fieldSummary(winner.fields).map(r => (r.html ? '[html] ' : '       ') + r.name + ' ' + r.size).join('\n') : '');
     document.getElementById('kjp-copy').onclick = async () => {
@@ -230,13 +231,13 @@
     document.getElementById('kjp-close').onclick = () => { document.getElementById('kjp-box').remove(); };
   }
 
-  // --- UI (bottom-LEFT so it never covers the KA Refresh buttons) ---------
+  // --- UI (top-LEFT: clear of Salesforce's bottom utility bar and the KA Refresh buttons) ---------
 
   GM_addStyle(`
-    #kjp-btn { position: fixed; bottom: 20px; left: 20px; z-index: 99999; padding: 10px 16px;
+    #kjp-btn { position: fixed; top: 110px; left: 20px; z-index: 2147483647; padding: 10px 16px;
       font: 600 13px -apple-system, sans-serif; background: #7C3AED; color: #fff; border: none;
       border-radius: 100px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
-    #kjp-box { position: fixed; bottom: 66px; left: 20px; z-index: 99999; width: 360px;
+    #kjp-box { position: fixed; top: 156px; left: 20px; z-index: 2147483647; width: 360px;
       background: #fff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,.16);
       padding: 14px 16px; font: 13px/1.5 -apple-system, sans-serif; color: #2F3033; }
     .kjp-btn { padding: 6px 12px; font-size: 12px; font-weight: 600; border: none;
@@ -263,6 +264,9 @@
     btn.onclick = runProbe;
     document.body.appendChild(btn);
   }
+
+  // Also runnable from the Tampermonkey menu, in case the button is hidden.
+  GM_registerMenuCommand('Run KA JSON test', runProbe);
 
   setTimeout(injectButton, 1500);
   let _href = location.href;
