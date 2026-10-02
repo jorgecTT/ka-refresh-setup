@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA JSON Probe (test only)
 // @namespace    ka-json-probe
-// @version      0.4.0
+// @version      0.5.0
 // @description  TEST ONLY. Checks whether the current KA can be read as the original Salesforce record (JSON) instead of from the page HTML. Read-only: never writes to Salesforce or Drive.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -247,31 +247,83 @@
     root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) collectTables(el.shadowRoot, out, depth + 1); });
   }
 
+  function isShown(el) {
+    // Visible in its own document AND (for iframes) the iframe itself is visible.
+    for (let cur = el; cur; ) {
+      const win = cur.ownerDocument && cur.ownerDocument.defaultView;
+      const r = cur.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return false;
+      const cs = win && win.getComputedStyle(cur);
+      if (cs && (cs.visibility === 'hidden' || cs.display === 'none')) return false;
+      cur = win && win.frameElement;
+    }
+    return true;
+  }
+
+  function readRows(table, into) {
+    let added = 0;
+    for (const tr of table.querySelectorAll('tbody tr')) {
+      const cells = Array.from(tr.querySelectorAll('td, th')).map(td => (td.innerText || '').trim());
+      const links = Array.from(tr.querySelectorAll('a[href]')).map(a => a.getAttribute('href'));
+      const recLink = links.find(h => /\/lightning\/r\/ka[0-9A-Za-z]{13,16}\//.test(h || ''));
+      const key = recLink || cells.join('|');
+      if (!recLink || into.has(key)) continue;   // skip header/total rows and repeats
+      into.set(key, { cells: cells, links: links });
+      added++;
+    }
+    return added;
+  }
+
+  function scrollParent(el) {
+    for (let cur = el; cur; cur = cur.parentElement) {
+      const cs = cur.ownerDocument.defaultView.getComputedStyle(cur);
+      if (/(auto|scroll)/.test(cs.overflowY) && cur.scrollHeight > cur.clientHeight + 5) return cur;
+    }
+    return null;
+  }
+
   async function tryReportTable() {
     const docs = [];
     collectDocs(document, docs, 0);
+    // Only the report on the tab you are looking at (console keeps other tabs loaded).
     let best = null;
     for (const d of docs) {
       const tables = [];
       collectTables(d, tables, 0);
       for (const t of tables) {
-        const n = t.querySelectorAll('tbody tr').length || t.querySelectorAll('tr').length;
+        if (!isShown(t)) continue;
+        const n = t.querySelectorAll('tbody tr').length;
         if (!best || n > best.n) best = { t: t, n: n, doc: d };
       }
     }
-    if (!best || best.n < 2) return { ok: false, why: 'No report table found on the screen (' + docs.length + ' frames checked)' };
-    const headers = Array.from(best.t.querySelectorAll('thead th, tr:first-child th'))
-      .map(th => (th.innerText || '').trim().split('\n')[0]).filter(Boolean).slice(0, 15);
-    const rows = Array.from(best.t.querySelectorAll('tbody tr')).map(tr => ({
-      cells: Array.from(tr.querySelectorAll('td, th')).map(td => (td.innerText || '').trim()),
-      links: Array.from(tr.querySelectorAll('a[href]')).map(a => a.getAttribute('href')),
-    }));
+    if (!best || best.n < 2) return { ok: false, why: 'No visible report table (' + docs.length + ' frames checked)' };
+
     const text = (best.doc.body && best.doc.body.innerText) || '';
     const m = text.match(/Total Records\s*([\d,]+)/i);
-    return { ok: true, tableRows: rows,
-             note: best.n + ' rows on screen' + (m ? '; report total ' + m[1] : '') +
-                   (docs.length > 1 ? '; ' + docs.length + ' frames' : '') + '; columns: ' + headers.join(' | ') };
+    const total = m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+
+    // Scroll the table's container step by step: Salesforce only draws the rows near the screen.
+    const rows = new Map();
+    readRows(best.t, rows);
+    const box = scrollParent(best.t);
+    const scroller = box || best.doc.scrollingElement;
+    let still = 0;
+    for (let i = 0; i < 400 && still < 6 && !(total && rows.size >= total); i++) {
+      const before = scroller.scrollTop;
+      scroller.scrollTop = before + Math.max(200, scroller.clientHeight * 0.8);
+      await sleep(350);
+      const added = readRows(best.t, rows);
+      still = (added === 0 && scroller.scrollTop === before) ? still + 1 : (added === 0 ? still + 0.5 : 0);
+    }
+    scroller.scrollTop = 0;
+    const list = Array.from(rows.values());
+    const complete = total === null ? null : list.length >= total;
+    return { ok: true, tableRows: list,
+             note: list.length + ' of ' + (total === null ? '?' : total) + ' rows read' +
+                   (complete === false ? ' (INCOMPLETE)' : complete ? ' (complete)' : '') };
   }
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function tryReportApi(reportId) {
     const r = await getJson('/services/data/' + API_VERSION + '/analytics/reports/' + reportId + '?includeDetails=true');
@@ -417,7 +469,7 @@
       '<button id="kjp-close" class="kjp-btn kjp-grey">Close</button></div>';
     box.innerHTML = html;
 
-    const summaryText = 'KA JSON Probe v0.4.0 - ' + (id ? 'record ' + id : 'report ' + rid) + '\n' +
+    const summaryText = 'KA JSON Probe v0.5.0 - ' + (id ? 'record ' + id : 'report ' + rid) + '\n' +
       results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + resultLine(r)).join('\n') +
       (winner ? '\n\nFields:\n' + fieldSummary(winner.fields).map(r => (r.html ? '[html] ' : '       ') + r.name + ' ' + r.size).join('\n') : '');
     document.getElementById('kjp-copy').onclick = async () => {
