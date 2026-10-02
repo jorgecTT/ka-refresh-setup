@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA JSON Probe (test only)
 // @namespace    ka-json-probe
-// @version      0.3.0
+// @version      0.4.0
 // @description  TEST ONLY. Checks whether the current KA can be read as the original Salesforce record (JSON) instead of from the page HTML. Read-only: never writes to Salesforce or Drive.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -221,6 +221,58 @@
     });
   }
 
+  // F2. Same export, but on the Lightning domain (same origin as the page).
+  async function tryReportExportLightning(reportId) {
+    const resp = await fetch('/' + reportId + '?export=1&enc=UTF-8&xf=csv', { credentials: 'include' });
+    const t = await resp.text();
+    if (!resp.ok) return { ok: false, why: 'HTTP ' + resp.status };
+    if (/^\s*</.test(t)) return { ok: false, why: 'Got a web page instead of a CSV' };
+    const lines = t.split(/\r?\n/).filter(l => l.trim());
+    return { ok: true, csv: t, note: Math.max(0, lines.length - 1) + ' rows; columns: ' + (lines[0] || '').slice(0, 300) };
+  }
+
+  // H. Read the report table that is already drawn on the screen (also
+  //    inside same-origin iframes and shadow DOM).
+  function collectDocs(doc, out, depth) {
+    out.push(doc);
+    if (depth > 3) return;
+    doc.querySelectorAll('iframe').forEach(f => {
+      try { if (f.contentDocument) collectDocs(f.contentDocument, out, depth + 1); } catch (e) { /* cross-origin frame */ }
+    });
+  }
+
+  function collectTables(root, out, depth) {
+    root.querySelectorAll('table').forEach(t => out.push(t));
+    if (depth > 20) return;
+    root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) collectTables(el.shadowRoot, out, depth + 1); });
+  }
+
+  async function tryReportTable() {
+    const docs = [];
+    collectDocs(document, docs, 0);
+    let best = null;
+    for (const d of docs) {
+      const tables = [];
+      collectTables(d, tables, 0);
+      for (const t of tables) {
+        const n = t.querySelectorAll('tbody tr').length || t.querySelectorAll('tr').length;
+        if (!best || n > best.n) best = { t: t, n: n, doc: d };
+      }
+    }
+    if (!best || best.n < 2) return { ok: false, why: 'No report table found on the screen (' + docs.length + ' frames checked)' };
+    const headers = Array.from(best.t.querySelectorAll('thead th, tr:first-child th'))
+      .map(th => (th.innerText || '').trim().split('\n')[0]).filter(Boolean).slice(0, 15);
+    const rows = Array.from(best.t.querySelectorAll('tbody tr')).map(tr => ({
+      cells: Array.from(tr.querySelectorAll('td, th')).map(td => (td.innerText || '').trim()),
+      links: Array.from(tr.querySelectorAll('a[href]')).map(a => a.getAttribute('href')),
+    }));
+    const text = (best.doc.body && best.doc.body.innerText) || '';
+    const m = text.match(/Total Records\s*([\d,]+)/i);
+    return { ok: true, tableRows: rows,
+             note: best.n + ' rows on screen' + (m ? '; report total ' + m[1] : '') +
+                   (docs.length > 1 ? '; ' + docs.length + ' frames' : '') + '; columns: ' + headers.join(' | ') };
+  }
+
   async function tryReportApi(reportId) {
     const r = await getJson('/services/data/' + API_VERSION + '/analytics/reports/' + reportId + '?includeDetails=true');
     if (r.error) return { ok: false, why: r.error };
@@ -326,17 +378,20 @@
     if (rid) {
       box.innerHTML = '<b>Testing the report export...</b>';
       results.push(await attempt('F. Report export (CSV)', () => tryReportExport(rid)));
+      results.push(await attempt('F2. Report export (Lightning domain)', () => tryReportExportLightning(rid)));
+      results.push(await attempt('H. Report table on screen', tryReportTable));
       results.push(await attempt('G. Report API', () => tryReportApi(rid)));
     }
 
     const winner = results.find(r => r.ok && r.fields);
-    const list = results.find(r => r.ok && (r.rows || r.csv || r.report));
+    const list = results.find(r => r.ok && (r.rows || r.csv || r.report || r.tableRows));
     _lastJson = { recordId: id, reportId: rid };
     if (winner) { _lastJson.method = winner.label; _lastJson.fields = winner.fields; }
     for (const r of results) {
       if (r.ok && r.rows) _lastJson['list_' + r.label.charAt(0)] = r.rows;
       if (r.ok && r.csv) _lastJson.reportCsv = r.csv;
       if (r.ok && r.report) _lastJson.reportJson = r.report;
+      if (r.ok && r.tableRows) _lastJson.reportTable = r.tableRows;
     }
     const anyOk = results.some(r => r.ok);
 
@@ -362,7 +417,7 @@
       '<button id="kjp-close" class="kjp-btn kjp-grey">Close</button></div>';
     box.innerHTML = html;
 
-    const summaryText = 'KA JSON Probe v0.3.0 - ' + (id ? 'record ' + id : 'report ' + rid) + '\n' +
+    const summaryText = 'KA JSON Probe v0.4.0 - ' + (id ? 'record ' + id : 'report ' + rid) + '\n' +
       results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + resultLine(r)).join('\n') +
       (winner ? '\n\nFields:\n' + fieldSummary(winner.fields).map(r => (r.html ? '[html] ' : '       ') + r.name + ' ' + r.size).join('\n') : '');
     document.getElementById('kjp-copy').onclick = async () => {
