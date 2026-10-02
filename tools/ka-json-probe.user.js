@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA JSON Probe (test only)
 // @namespace    ka-json-probe
-// @version      0.1.2
+// @version      0.2.0
 // @description  TEST ONLY. Checks whether the current KA can be read as the original Salesforce record (JSON) instead of from the page HTML. Read-only: never writes to Salesforce or Drive.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -96,7 +96,10 @@
   // --- Method B: UI API on the Lightning domain ---------------------------
 
   async function tryUiApi(id) {
-    const url = '/services/data/' + API_VERSION + '/ui-api/records/' + id + '?layoutTypes=Full&modes=View';
+    const extra = ['ArticleNumber', 'VersionNumber', 'PublishStatus', 'Language']
+      .map(f => 'Knowledge__kav.' + f).join(',');
+    const url = '/services/data/' + API_VERSION + '/ui-api/records/' + id +
+      '?layoutTypes=Full&modes=View&optionalFields=' + encodeURIComponent(extra);
     const resp = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
     const text = await resp.text();
     if (!resp.ok) return { ok: false, why: 'HTTP ' + resp.status + ' ' + shortErr(text) };
@@ -104,6 +107,38 @@
     try { json = JSON.parse(text); } catch (e) { return { ok: false, why: 'Response is not JSON (probably a login page)' }; }
     if (!json.fields) return { ok: false, why: 'Answer came back without fields' };
     return { ok: true, fields: flattenUiFields(json.fields), raw: json };
+  }
+
+  // --- Test D: list ALL published KAs (read-only SOQL query) --------------
+  // If this works, the weekly audit can compare Salesforce vs Drive without
+  // opening each KA. Tries with the English filter first, then without it.
+
+  async function tryPublishedList() {
+    const base = 'SELECT Id, ArticleNumber, Title, UrlName, VersionNumber, LastModifiedDate ' +
+      "FROM Knowledge__kav WHERE PublishStatus = 'Online'";
+    const queries = [base + " AND Language = 'en_US'", base];
+    let lastWhy = '';
+    for (const q of queries) {
+      let url = '/services/data/' + API_VERSION + '/query?q=' + encodeURIComponent(q);
+      const rows = [];
+      let total = null;
+      let failed = false;
+      for (let page = 0; url && page < 50; page++) {
+        const resp = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+        const text = await resp.text();
+        if (!resp.ok) { lastWhy = 'HTTP ' + resp.status + ' ' + shortErr(text); failed = true; break; }
+        let json;
+        try { json = JSON.parse(text); } catch (e) { lastWhy = 'Response is not JSON (probably a login page)'; failed = true; break; }
+        if (total === null) total = json.totalSize;
+        for (const r of json.records || []) {
+          rows.push({ id: r.Id, articleNumber: r.ArticleNumber, title: r.Title, urlName: r.UrlName,
+                      version: r.VersionNumber, lastModified: r.LastModifiedDate });
+        }
+        url = json.done ? null : json.nextRecordsUrl;
+      }
+      if (!failed) return { ok: true, total: total, rows: rows, englishOnly: q !== base };
+    }
+    return { ok: false, why: lastWhy };
   }
 
   // --- Method C: REST API on the my.salesforce.com domain -----------------
@@ -161,7 +196,7 @@
       const v = fields[k];
       if (v === null || v === undefined || v === '') continue;
       const s = typeof v === 'string' ? v : JSON.stringify(v);
-      rows.push({ name: k, size: s.length, html: /<[a-z][\s\S]*>/i.test(s) });
+      rows.push({ name: k, size: s.length, html: /<[a-z][\s\S]*>|&lt;[a-z]/i.test(s) });
     }
     rows.sort((a, b) => (b.html - a.html) || (b.size - a.size));
     return rows;
@@ -191,7 +226,17 @@
     }
 
     const winner = results.find(r => r.ok);
+    box.innerHTML = '<b>Testing the list of published KAs...</b>';
+    let list;
+    try { list = await tryPublishedList(); } catch (e) { list = { ok: false, why: 'Error: ' + e.message }; }
     _lastJson = winner ? { recordId: id, method: winner.label, fields: winner.fields } : null;
+    if (list.ok) {
+      _lastJson = _lastJson || { recordId: id };
+      _lastJson.publishedList = list.rows;
+    }
+    const listLine = list.ok
+      ? 'D. List of published KAs - ' + list.rows.length + ' KAs' + (list.englishOnly ? ' (English)' : ' (all languages)')
+      : 'D. List of published KAs - ' + list.why;
 
     let html = '<div style="font-weight:700;font-size:14px;margin-bottom:8px">' +
       (winner ? '\u2705 It works! The KA can be read as JSON.' : '\u274C Blocked: the KA cannot be read as JSON.') + '</div>';
@@ -200,6 +245,7 @@
         (r.ok ? ' - ' + Object.keys(r.fields).length + ' fields' : '<br><span style="color:#8A8D91">' + esc(r.why) + '</span>') +
         '</div>';
     }
+    html += '<div style="margin:4px 0">' + (list.ok ? '\u2705 <b>' : '\u274C <b>') + esc(listLine) + '</b></div>';
     if (winner) {
       const rows = fieldSummary(winner.fields);
       html += '<div style="margin-top:8px;font-weight:600">Fields with content (\uD83D\uDCC4 = has formatting/HTML):</div>' +
@@ -208,12 +254,13 @@
     }
     html += '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
       '<button id="kjp-copy" class="kjp-btn">Copy result</button>' +
-      (winner ? '<button id="kjp-dl" class="kjp-btn">Download JSON</button>' : '') +
+      (_lastJson ? '<button id="kjp-dl" class="kjp-btn">Download JSON</button>' : '') +
       '<button id="kjp-close" class="kjp-btn kjp-grey">Close</button></div>';
     box.innerHTML = html;
 
-    const summaryText = 'KA JSON Probe v0.1.2 - record ' + id + '\n' +
+    const summaryText = 'KA JSON Probe v0.2.0 - record ' + id + '\n' +
       results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + r.label + (r.ok ? ' (' + Object.keys(r.fields).length + ' fields)' : ' - ' + r.why)).join('\n') +
+      '\n' + (list.ok ? 'OK   ' : 'FAIL ') + listLine +
       (winner ? '\n\nFields:\n' + fieldSummary(winner.fields).map(r => (r.html ? '[html] ' : '       ') + r.name + ' ' + r.size).join('\n') : '');
     document.getElementById('kjp-copy').onclick = async () => {
       try { await navigator.clipboard.writeText(summaryText); document.getElementById('kjp-copy').textContent = 'Copied \u2713'; }
