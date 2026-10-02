@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA JSON Probe (test only)
 // @namespace    ka-json-probe
-// @version      0.2.0
+// @version      0.3.0
 // @description  TEST ONLY. Checks whether the current KA can be read as the original Salesforce record (JSON) instead of from the page HTML. Read-only: never writes to Salesforce or Drive.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -14,7 +14,9 @@
 // ==/UserScript==
 
 /*
- * Tries 3 read-only ways to get the KA record as JSON:
+ * On a KA page it tries 3 read-only ways to get the KA record as JSON, and on
+ * a KA or Report page it tries read-only ways to get the full list of
+ * published KAs (GraphQL, list view, report export). Record tests:
  *   A. Lightning's own internal channel (Aura "getRecordWithLayouts") - the
  *      same call the page makes to draw the record.
  *   B. UI API on the Lightning domain (/services/data/.../ui-api/records).
@@ -30,11 +32,17 @@
   const API_VERSION = 'v59.0';
   const MY_DOMAIN = 'https://thumbtack.my.salesforce.com';
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\/([a-zA-Z0-9]{15,18})/;
+  const REPORT_URL_PATTERN = /\/lightning\/r\/Report\/(00O[a-zA-Z0-9]{12,15})/;
 
   let _lastJson = null;
 
   function recordId() {
     const m = location.href.match(KA_URL_PATTERN);
+    return m ? m[1] : null;
+  }
+
+  function reportId() {
+    const m = location.href.match(REPORT_URL_PATTERN);
     return m ? m[1] : null;
   }
 
@@ -109,36 +117,115 @@
     return { ok: true, fields: flattenUiFields(json.fields), raw: json };
   }
 
-  // --- Test D: list ALL published KAs (read-only SOQL query) --------------
-  // If this works, the weekly audit can compare Salesforce vs Drive without
-  // opening each KA. Tries with the English filter first, then without it.
+  // --- List tests: can we get ALL published KAs at once? -----------------
+  // The Lightning session only opens the "UI API" door (plain SOQL /query
+  // returned 401 in v0.2.0), so these use UI API routes, plus the classic
+  // report export when the button is pressed on a Report page.
 
-  async function tryPublishedList() {
-    const base = 'SELECT Id, ArticleNumber, Title, UrlName, VersionNumber, LastModifiedDate ' +
-      "FROM Knowledge__kav WHERE PublishStatus = 'Online'";
-    const queries = [base + " AND Language = 'en_US'", base];
-    let lastWhy = '';
-    for (const q of queries) {
-      let url = '/services/data/' + API_VERSION + '/query?q=' + encodeURIComponent(q);
-      const rows = [];
-      let total = null;
-      let failed = false;
-      for (let page = 0; url && page < 50; page++) {
-        const resp = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
-        const text = await resp.text();
-        if (!resp.ok) { lastWhy = 'HTTP ' + resp.status + ' ' + shortErr(text); failed = true; break; }
-        let json;
-        try { json = JSON.parse(text); } catch (e) { lastWhy = 'Response is not JSON (probably a login page)'; failed = true; break; }
-        if (total === null) total = json.totalSize;
-        for (const r of json.records || []) {
-          rows.push({ id: r.Id, articleNumber: r.ArticleNumber, title: r.Title, urlName: r.UrlName,
-                      version: r.VersionNumber, lastModified: r.LastModifiedDate });
-        }
-        url = json.done ? null : json.nextRecordsUrl;
+  const LIST_FIELDS = ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate', 'PublishStatus', 'Language'];
+
+  function listRow(get) {
+    return {
+      id: get('Id'), articleNumber: get('ArticleNumber'), title: get('Title'), urlName: get('UrlName'),
+      version: get('VersionNumber'), lastModified: get('LastModifiedDate'),
+      publishStatus: get('PublishStatus'), language: get('Language'),
+    };
+  }
+
+  // D. UI API GraphQL (read-only query), 2000 per page.
+  async function tryGraphQL() {
+    const rows = [];
+    let after = null;
+    for (let page = 0; page < 25; page++) {
+      const query = 'query KaList($after: String) { uiapi { query { Knowledge__kav(first: 2000, after: $after, ' +
+        'where: { PublishStatus: { eq: "Online" } }) { totalCount pageInfo { hasNextPage endCursor } ' +
+        'edges { node { Id ' + LIST_FIELDS.map(f => f + ' { value }').join(' ') + ' } } } } } }';
+      const resp = await fetch('/services/data/' + API_VERSION + '/graphql', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query: query, variables: { after: after } }),
+      });
+      const text = await resp.text();
+      if (!resp.ok) return { ok: false, why: 'HTTP ' + resp.status + ' ' + shortErr(text) };
+      let json;
+      try { json = JSON.parse(text); } catch (e) { return { ok: false, why: 'Response is not JSON (probably a login page)' }; }
+      if (json.errors && json.errors.length) return { ok: false, why: 'Salesforce said: ' + (json.errors[0].message || 'error') };
+      const conn = json.data && json.data.uiapi && json.data.uiapi.query && json.data.uiapi.query.Knowledge__kav;
+      if (!conn) return { ok: false, why: 'Answer came back without a list' };
+      for (const e of conn.edges || []) {
+        const n = e.node || {};
+        rows.push(listRow(f => (f === 'Id' ? n.Id : (n[f] && n[f].value))));
       }
-      if (!failed) return { ok: true, total: total, rows: rows, englishOnly: q !== base };
+      if (!conn.pageInfo || !conn.pageInfo.hasNextPage) return { ok: true, rows: rows, note: 'totalCount ' + conn.totalCount };
+      after = conn.pageInfo.endCursor;
     }
-    return { ok: false, why: lastWhy };
+    return { ok: true, rows: rows, note: 'stopped after 25 pages' };
+  }
+
+  // E. UI API list views (e.g. the "Published Articles" tab).
+  async function getJson(url) {
+    const resp = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' } });
+    const text = await resp.text();
+    if (!resp.ok) return { error: 'HTTP ' + resp.status + ' ' + shortErr(text) };
+    try { return { json: JSON.parse(text) }; } catch (e) { return { error: 'Response is not JSON (probably a login page)' }; }
+  }
+
+  async function tryListView() {
+    const base = '/services/data/' + API_VERSION + '/ui-api';
+    let views = null;
+    let why = '';
+    for (const path of ['/list-info/Knowledge__kav?recentListsOnly=false', '/list-ui/Knowledge__kav?pageSize=200']) {
+      const r = await getJson(base + path);
+      if (r.error) { why = r.error; continue; }
+      const coll = r.json.lists || r.json.listInfoBatch || (r.json.lists && r.json.lists.lists) || [];
+      views = coll.map(v => ({ apiName: v.apiName || (v.listReference && v.listReference.listViewApiName),
+                               label: v.label, id: v.id || (v.listReference && v.listReference.id) }))
+                  .filter(v => v.apiName);
+      if (views.length) break;
+    }
+    if (!views || !views.length) return { ok: false, why: 'Could not read the list views: ' + why };
+    const view = views.find(v => /publish/i.test(v.label || '')) || views[0];
+    const rows = [];
+    let pageToken = null;
+    const fields = LIST_FIELDS.map(f => 'Knowledge__kav.' + f).join(',');
+    for (let page = 0; page < 25; page++) {
+      const url = base + '/list-records/Knowledge__kav/' + encodeURIComponent(view.apiName) +
+        '?pageSize=2000&optionalFields=' + encodeURIComponent(fields) + (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+      const r = await getJson(url);
+      if (r.error) return { ok: false, why: 'View "' + view.label + '": ' + r.error };
+      for (const rec of r.json.records || []) {
+        const f = rec.fields || {};
+        rows.push(listRow(k => (k === 'Id' ? rec.id : (f[k] && f[k].value))));
+      }
+      pageToken = r.json.nextPageToken;
+      if (!pageToken) break;
+    }
+    return { ok: true, rows: rows, note: 'view "' + view.label + '" (' + views.length + ' views found)' };
+  }
+
+  // F. Report export (only when the button is pressed on a Report page).
+  function tryReportExport(reportId) {
+    return new Promise((resolve) => {
+      GM_xmlhttpRequest({
+        method: 'GET',
+        url: MY_DOMAIN + '/' + reportId + '?export=1&enc=UTF-8&xf=csv',
+        onload(resp) {
+          const t = resp.responseText || '';
+          if (resp.status !== 200) { resolve({ ok: false, why: 'HTTP ' + resp.status }); return; }
+          if (/^\s*</.test(t)) { resolve({ ok: false, why: 'Got a web page instead of a CSV (probably a login page)' }); return; }
+          const lines = t.split(/\r?\n/).filter(l => l.trim());
+          resolve({ ok: true, csv: t, note: Math.max(0, lines.length - 1) + ' rows; columns: ' + (lines[0] || '').slice(0, 300) });
+        },
+        onerror() { resolve({ ok: false, why: 'Network error / blocked' }); },
+      });
+    });
+  }
+
+  async function tryReportApi(reportId) {
+    const r = await getJson('/services/data/' + API_VERSION + '/analytics/reports/' + reportId + '?includeDetails=true');
+    if (r.error) return { ok: false, why: r.error };
+    const rows = ((r.json.factMap || {})['T!T'] || {}).rows || [];
+    return { ok: true, report: r.json, note: rows.length + ' rows' };
   }
 
   // --- Method C: REST API on the my.salesforce.com domain -----------------
@@ -208,59 +295,75 @@
 
   // --- Run -----------------------------------------------------------------
 
+  async function attempt(label, fn) {
+    let r;
+    try { r = await fn(); } catch (e) { r = { ok: false, why: 'Error: ' + e.message }; }
+    return Object.assign({ label: label }, r);
+  }
+
+  function resultLine(r) {
+    if (!r.ok) return r.label + ' - ' + r.why;
+    if (r.fields) return r.label + ' - ' + Object.keys(r.fields).length + ' fields';
+    if (r.rows) return r.label + ' - ' + r.rows.length + ' KAs' + (r.note ? ' (' + r.note + ')' : '');
+    return r.label + (r.note ? ' - ' + r.note : '');
+  }
+
   async function runProbe() {
     const id = recordId();
+    const rid = reportId();
     const box = showBox('<b>Testing...</b>');
-    if (!id) { box.innerHTML = '\u274C Open a KA first (the URL must contain Knowledge__kav).'; return; }
+    if (!id && !rid) { box.innerHTML = '\u274C Open a KA or a Report first.'; return; }
 
-    const methods = [
-      ['A. Lightning internal channel', tryAura],
-      ['B. UI API (Lightning domain)', tryUiApi],
-      ['C. REST API (my.salesforce.com)', tryRest],
-    ];
     const results = [];
-    for (const [label, fn] of methods) {
-      let r;
-      try { r = await fn(id); } catch (e) { r = { ok: false, why: 'Error: ' + e.message }; }
-      results.push({ label, ...r });
+    if (id) {
+      results.push(await attempt('A. Lightning internal channel', () => tryAura(id)));
+      results.push(await attempt('B. UI API (Lightning domain)', () => tryUiApi(id)));
+      results.push(await attempt('C. REST API (my.salesforce.com)', () => tryRest(id)));
     }
-
-    const winner = results.find(r => r.ok);
     box.innerHTML = '<b>Testing the list of published KAs...</b>';
-    let list;
-    try { list = await tryPublishedList(); } catch (e) { list = { ok: false, why: 'Error: ' + e.message }; }
-    _lastJson = winner ? { recordId: id, method: winner.label, fields: winner.fields } : null;
-    if (list.ok) {
-      _lastJson = _lastJson || { recordId: id };
-      _lastJson.publishedList = list.rows;
+    results.push(await attempt('D. List via GraphQL', tryGraphQL));
+    results.push(await attempt('E. List via list view', tryListView));
+    if (rid) {
+      box.innerHTML = '<b>Testing the report export...</b>';
+      results.push(await attempt('F. Report export (CSV)', () => tryReportExport(rid)));
+      results.push(await attempt('G. Report API', () => tryReportApi(rid)));
     }
-    const listLine = list.ok
-      ? 'D. List of published KAs - ' + list.rows.length + ' KAs' + (list.englishOnly ? ' (English)' : ' (all languages)')
-      : 'D. List of published KAs - ' + list.why;
 
-    let html = '<div style="font-weight:700;font-size:14px;margin-bottom:8px">' +
-      (winner ? '\u2705 It works! The KA can be read as JSON.' : '\u274C Blocked: the KA cannot be read as JSON.') + '</div>';
+    const winner = results.find(r => r.ok && r.fields);
+    const list = results.find(r => r.ok && (r.rows || r.csv || r.report));
+    _lastJson = { recordId: id, reportId: rid };
+    if (winner) { _lastJson.method = winner.label; _lastJson.fields = winner.fields; }
     for (const r of results) {
-      html += '<div style="margin:4px 0">' + (r.ok ? '\u2705 ' : '\u274C ') + '<b>' + esc(r.label) + '</b>' +
-        (r.ok ? ' - ' + Object.keys(r.fields).length + ' fields' : '<br><span style="color:#8A8D91">' + esc(r.why) + '</span>') +
+      if (r.ok && r.rows) _lastJson['list_' + r.label.charAt(0)] = r.rows;
+      if (r.ok && r.csv) _lastJson.reportCsv = r.csv;
+      if (r.ok && r.report) _lastJson.reportJson = r.report;
+    }
+    const anyOk = results.some(r => r.ok);
+
+    let head = [];
+    if (id) head.push(winner ? '\u2705 The KA can be read as JSON.' : '\u274C The KA cannot be read as JSON.');
+    head.push(list ? '\u2705 A full list can be read.' : '\u274C No full list yet.');
+    let html = '<div style="font-weight:700;font-size:14px;margin-bottom:8px">' + head.join('<br>') + '</div>';
+    for (const r of results) {
+      const parts = resultLine(r).split(' - ');
+      html += '<div style="margin:4px 0">' + (r.ok ? '\u2705 ' : '\u274C ') + '<b>' + esc(parts.shift()) + '</b>' +
+        (parts.length ? (r.ok ? ' - ' + esc(parts.join(' - ')) : '<br><span style="color:#8A8D91">' + esc(parts.join(' - ')) + '</span>') : '') +
         '</div>';
     }
-    html += '<div style="margin:4px 0">' + (list.ok ? '\u2705 <b>' : '\u274C <b>') + esc(listLine) + '</b></div>';
     if (winner) {
       const rows = fieldSummary(winner.fields);
       html += '<div style="margin-top:8px;font-weight:600">Fields with content (\uD83D\uDCC4 = has formatting/HTML):</div>' +
-        '<div style="max-height:180px;overflow:auto;font-size:11px;border:1px solid #E8E9EB;border-radius:6px;padding:6px">' +
+        '<div style="max-height:140px;overflow:auto;font-size:11px;border:1px solid #E8E9EB;border-radius:6px;padding:6px">' +
         rows.map(r => (r.html ? '\uD83D\uDCC4 ' : '\u25AB\uFE0F ') + esc(r.name) + ' - ' + r.size + ' chars').join('<br>') + '</div>';
     }
     html += '<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">' +
       '<button id="kjp-copy" class="kjp-btn">Copy result</button>' +
-      (_lastJson ? '<button id="kjp-dl" class="kjp-btn">Download JSON</button>' : '') +
+      (anyOk ? '<button id="kjp-dl" class="kjp-btn">Download JSON</button>' : '') +
       '<button id="kjp-close" class="kjp-btn kjp-grey">Close</button></div>';
     box.innerHTML = html;
 
-    const summaryText = 'KA JSON Probe v0.2.0 - record ' + id + '\n' +
-      results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + r.label + (r.ok ? ' (' + Object.keys(r.fields).length + ' fields)' : ' - ' + r.why)).join('\n') +
-      '\n' + (list.ok ? 'OK   ' : 'FAIL ') + listLine +
+    const summaryText = 'KA JSON Probe v0.3.0 - ' + (id ? 'record ' + id : 'report ' + rid) + '\n' +
+      results.map(r => (r.ok ? 'OK   ' : 'FAIL ') + resultLine(r)).join('\n') +
       (winner ? '\n\nFields:\n' + fieldSummary(winner.fields).map(r => (r.html ? '[html] ' : '       ') + r.name + ' ' + r.size).join('\n') : '');
     document.getElementById('kjp-copy').onclick = async () => {
       try { await navigator.clipboard.writeText(summaryText); document.getElementById('kjp-copy').textContent = 'Copied \u2713'; }
@@ -271,7 +374,7 @@
       const blob = new Blob([JSON.stringify(_lastJson, null, 2)], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'ka-' + id + '.json';
+      a.download = 'ka-probe-' + (id || rid) + '.json';
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     };
@@ -300,7 +403,7 @@
   }
 
   function injectButton() {
-    if (!KA_URL_PATTERN.test(location.href)) {
+    if (!KA_URL_PATTERN.test(location.href) && !REPORT_URL_PATTERN.test(location.href)) {
       const b = document.getElementById('kjp-btn'); if (b) b.remove();
       return;
     }
