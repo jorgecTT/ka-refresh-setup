@@ -34,19 +34,27 @@ kas.forEach((k, i) => {
 });
 files.extra = { folder: PUB, title: 'Retired - internal - GTM - EN', description: 'KA_META:000999999|x|\n', modifiedDate: '2026-09-15T00:00:00Z' };
 
-// A report page: the table lives in an iframe and only ~33 rows are drawn.
+// A report page like Salesforce's: the table lives in an iframe, only ~33 rows
+// are drawn at a time, rows arrive in batches of 100 (the next batch takes
+// 2.5 s after you reach the bottom) and the <table> element is replaced on
+// every redraw.
 function reportFrame(team) {
   const rows = kas.filter(k => k.team === team);
   return `<html><body style="margin:0"><div>Total Records ${rows.length}</div>
-  <div id="sc" style="height:500px;overflow:auto"><div style="height:${rows.length * 40}px;position:relative">
-  <table id="t" style="position:absolute;top:0"><thead><tr><th>Title</th><th>Full Article URL</th></tr></thead><tbody></tbody></table></div></div>
+  <div id="sc" style="height:500px;overflow:auto"><div id="sp" style="position:relative"></div></div>
   <script>
   const rows=${JSON.stringify(rows.map(k => [k.id, k.slug, k.title]))};
-  const sc=document.getElementById('sc'), tb=document.querySelector('tbody'), t=document.getElementById('t');
-  function draw(){ const f=Math.floor(sc.scrollTop/40), l=Math.min(rows.length,f+33); t.style.top=(f*40)+'px';
-    tb.innerHTML=''; for(let i=f;i<l;i++){ const r=rows[i];
-      tb.innerHTML+='<tr style="height:40px"><td>'+(i+1)+'</td><td><a href="/lightning/r/'+r[0]+'/view">'+r[2]+'</a></td>'+
-        '<td><a href="/articles/Knowledge/'+r[1]+'">Right click and copy link</a></td></tr>'; } }
+  const sc=document.getElementById('sc'), sp=document.getElementById('sp');
+  let loaded=Math.min(100, rows.length), loading=false;
+  function draw(){ sp.style.height=(loaded*40)+'px';
+    const f=Math.floor(sc.scrollTop/40), l=Math.min(loaded,f+33);
+    let h='<table style="position:absolute;top:'+(f*40)+'px"><thead><tr><th>Title</th><th>Full Article URL</th></tr></thead><tbody>';
+    for(let i=f;i<l;i++){ const r=rows[i];
+      h+='<tr style="height:40px"><td>'+(i+1)+'</td><td><a href="/lightning/r/'+r[0]+'/view">'+r[2]+'</a></td>'+
+        '<td><a href="/articles/Knowledge/'+r[1]+'">Right click and copy link</a></td></tr>'; }
+    sp.innerHTML=h+'</tbody></table>';
+    if (!loading && loaded<rows.length && sc.scrollTop+sc.clientHeight>=loaded*40-5) {
+      loading=true; setTimeout(()=>{ loaded=Math.min(rows.length, loaded+100); loading=false; draw(); }, 2500); } }
   sc.addEventListener('scroll',()=>setTimeout(draw,60)); setTimeout(draw,800);
   </script></body></html>`;
 }

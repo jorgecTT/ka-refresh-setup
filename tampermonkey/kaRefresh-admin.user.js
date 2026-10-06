@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.2.1
+// @version      2.2.2
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -49,6 +49,9 @@
  * v2.2.1 - Audit: the list of Knowledge views falls back to /list-ui when
  *   /list-info answers 404 (it does in this org).
  *
+ * v2.2.2 - Audit: long reports (Support, 170+ rows) load in batches; the
+ *   reader now waits at the bottom, follows a swapped table and retries.
+ *
  * Reviewer: asked once, remembered. Click the reviewer name in the status
  * overlay to change it. Audience: asked only when CREATING a new Doc.
  */
@@ -84,7 +87,7 @@
     { team: 'Trust & Safety', reportId: '00OVx000006ORWfMAO', label: 'T&S KAs: Active' },
   ];
 
-  console.log('[KA Refresh] v2.2.1 loaded (admin)');
+  console.log('[KA Refresh] v2.2.2 loaded (admin)');
 
   function walkAll(root, callback, depth) {
     if (depth > 30 || !root) return;
@@ -1266,7 +1269,8 @@
     return null;
   }
 
-  async function readReportTable(onProgress) {
+  // Largest visible table (the console keeps other report tabs loaded but hidden).
+  function findReportTable() {
     const docs = [];
     collectDocs(document, docs, 0);
     let best = null;
@@ -1279,24 +1283,55 @@
         if (!best || n > best.n) best = { t: t, n: n, doc: d };
       }
     }
-    if (!best || best.n < 2) return { ok: false, why: 'the report table is not on screen yet' };
-    const m = ((best.doc.body && best.doc.body.innerText) || '').match(/Total Records\s*([\d,]+)/i);
-    const total = m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+    return best && best.n >= 2 ? best : null;
+  }
 
+  function reportTotal(doc) {
+    const m = ((doc.body && doc.body.innerText) || '').match(/Total Records\s*([\d,]+)/i);
+    return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+  }
+
+  // Long reports load in batches: at the bottom Salesforce needs a few seconds
+  // to fetch the next rows, and it may swap the table element meanwhile. So:
+  // re-find the table every step, wait at the bottom, give up on a pass only
+  // after 15 s without new rows, and do up to 3 passes from the top.
+  async function readReportTable(onProgress) {
+    let best = findReportTable();
+    if (!best) return { ok: false, why: 'the report table is not on screen yet' };
+    let total = reportTotal(best.doc);
     const rows = new Map();
     readRows(best.t, rows);
     if (!rows.size) return { ok: false, why: 'the report rows have no KA links yet' };
-    const scroller = scrollParent(best.t) || best.doc.scrollingElement;
-    let still = 0;
-    for (let i = 0; i < 400 && still < 6 && !(total && rows.size >= total); i++) {
-      const before = scroller.scrollTop;
-      scroller.scrollTop = before + Math.max(200, scroller.clientHeight * 0.8);
-      await sleep(350);
-      const added = readRows(best.t, rows);
-      if (onProgress) onProgress(rows.size, total);
-      still = (added === 0 && scroller.scrollTop === before) ? still + 1 : (added === 0 ? still + 0.5 : 0);
+    const STALL_MS = 15000;
+    const done = () => total !== null && rows.size >= total;
+    const scrollerOf = (b) => scrollParent(b.t) || b.doc.scrollingElement;
+
+    for (let pass = 0; pass < 3 && !done(); pass++) {
+      let scroller = scrollerOf(best);
+      if (pass > 0) { scroller.scrollTop = 0; await sleep(1500); }
+      let lastNew = Date.now();
+      while (!done() && Date.now() - lastNew < STALL_MS) {
+        const before = scroller.scrollTop;
+        scroller.scrollTop = before + Math.max(200, scroller.clientHeight * 0.8);
+        await sleep(400);
+        if (scroller.scrollTop === before) {
+          // At the bottom: wait for the next batch, then nudge to trigger loading.
+          await sleep(1200);
+          scroller.scrollTop = Math.max(0, before - 300);
+          await sleep(300);
+          scroller.scrollTop = scroller.scrollHeight;
+          await sleep(500);
+        }
+        const fresh = findReportTable();
+        if (fresh) {
+          if (fresh.t !== best.t || fresh.doc !== best.doc) { best = fresh; scroller = scrollerOf(best); }
+          if (total === null) total = reportTotal(best.doc);
+        }
+        if (readRows(best.t, rows) > 0) lastNew = Date.now();
+        if (onProgress) onProgress(rows.size, total);
+      }
     }
-    scroller.scrollTop = 0;
+    try { scrollerOf(best).scrollTop = 0; } catch (e) { /* table gone */ }
     return { ok: true, rows: Array.from(rows.values()), total: total };
   }
 
