@@ -78,6 +78,13 @@ function loadBackend(opts) {
       },
     },
     SpreadsheetApp: { openById: () => ss },
+    DocumentApp: {
+      openById(id) {
+        const f = files[id];
+        if (!f) throw new Error('no doc ' + id);
+        return { getHeader: () => (f.headerVersion ? { getText: () => 'Published link: x\nVersion: ' + f.headerVersion + '\n' } : null) };
+      },
+    },
     MailApp: { sendEmail: (m) => mails.push(m) },
     Session: { getEffectiveUser: () => ({ getEmail: () => 'owner@example.com' }) },
     Logger: { log() {} },
@@ -234,6 +241,37 @@ test('URL Names that differ only in case are different KAs', () => {
   const tab = Object.fromEntries(sheets.ka_audit.data().slice(1).map(x => [x[2], x[0]]));
   assert.strictEqual(tab['Background checks (incidents)'], 'OK');
   assert.strictEqual(tab['Background Checks (Pro)'], 'OK');
+});
+
+test('outdated: same version in the Doc header is not outdated; 10-minute tolerance', () => {
+  const published = [
+    { id: 'kaS', articleNumber: '000201', title: 'Same version', urlName: 'Same', version: 7, lastModified: '2026-09-20T10:00:00.000Z' },
+    { id: 'kaN', articleNumber: '000202', title: 'New version',  urlName: 'New',  version: 8, lastModified: '2026-09-20T10:00:00.000Z' },
+    { id: 'kaM', articleNumber: '000203', title: 'Minutes',      urlName: 'Min',  version: 3, lastModified: '2026-09-10T00:05:00.000Z' },
+    { id: 'kaH', articleNumber: '000204', title: 'No header',    urlName: 'NoH',  version: 3, lastModified: '2026-09-20T10:00:00.000Z' },
+  ];
+  const files = {
+    dS: { folder: PUB, title: 'Same version - internal - GTM - EN', description: meta('000201', 'Same'), modifiedDate: '2026-09-10T00:00:00Z', headerVersion: '7' },
+    dN: { folder: PUB, title: 'New version - internal - GTM - EN',  description: meta('000202', 'New'),  modifiedDate: '2026-09-10T00:00:00Z', headerVersion: '6' },
+    dM: { folder: PUB, title: 'Minutes - internal - GTM - EN',      description: meta('000203', 'Min'),  modifiedDate: '2026-09-10T00:00:00Z', headerVersion: '2' },
+    dH: { folder: PUB, title: 'No header - internal - GTM - EN',    description: meta('000204', 'NoH'),  modifiedDate: '2026-09-10T00:00:00Z' },
+  };
+  const reports = [
+    { team: 'GTM', rows: ['kaS', 'kaN', 'kaM', 'kaH'].map(id => ({ recordId: id })) },
+    { team: 'Support Ops', rows: [{ recordId: 'kaX' }] },
+    { team: 'Trust & Safety', rows: [{ recordId: 'kaY' }] },
+  ];
+  const { g, sheets } = loadBackend({ files, props: { SHARED_SECRET: 's' } });
+  const r = post(g, { secret: 's', action: 'audit', reports, published, by: 'J' });
+  assert.ok(r.ok, JSON.stringify(r));
+  const tab = Object.fromEntries(sheets.ka_audit.data().slice(1).map(x => [x[2], x]));
+  assert.strictEqual(tab['Same version'][0], 'OK');
+  assert.ok(/Misma versión \(v7\)/.test(tab['Same version'][8]), tab['Same version'][8]);
+  assert.strictEqual(tab['New version'][0], 'Desactualizado');
+  assert.ok(/Doc en v6, Salesforce en v8/.test(tab['New version'][8]));
+  assert.strictEqual(tab['Minutes'][0], 'OK', '5 minutes is inside the tolerance');
+  assert.strictEqual(tab['No header'][0], 'Desactualizado', 'no header version: keep it outdated');
+  assert.strictEqual(tab['Same version'][3], "'000201", 'number kept as text');
 });
 
 test('audit flags a real wrong team', () => {

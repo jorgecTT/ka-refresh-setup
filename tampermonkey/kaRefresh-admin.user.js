@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.2.2
+// @version      2.3.0
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -52,6 +52,10 @@
  * v2.2.2 - Audit: long reports (Support, 170+ rows) load in batches; the
  *   reader now waits at the bottom, follows a swapped table and retries.
  *
+ * v2.3.0 - "Refresh outdated": re-syncs only the KAs the last audit marked
+ *   "Desactualizado" (ka_audit tab). "Refresh all" stays for code/format
+ *   changes that need every Doc rebuilt.
+ *
  * Reviewer: asked once, remembered. Click the reviewer name in the status
  * overlay to change it. Audience: asked only when CREATING a new Doc.
  */
@@ -81,13 +85,14 @@
 
   // Weekly audit - Nichole's Content Index reports, one per team.
   const K_AUDIT = 'KAR2_audit';
+  const AUDIT_TAB = 'ka_audit';
   const AUDIT_REPORTS = [
     { team: 'GTM',            reportId: '00OVx000006OQHFMA4', label: 'GTM KAs: Active' },
     { team: 'Support Ops',    reportId: '00OVx000006GGADMA4', label: 'Support KAs: Active' },
     { team: 'Trust & Safety', reportId: '00OVx000006ORWfMAO', label: 'T&S KAs: Active' },
   ];
 
-  console.log('[KA Refresh] v2.2.2 loaded (admin)');
+  console.log('[KA Refresh] v2.3.0 loaded (admin)');
 
   function walkAll(root, callback, depth) {
     if (depth > 30 || !root) return;
@@ -781,6 +786,8 @@
     #kar-batch5-btn:hover:not(:disabled) { background: #64676B; }
     #kar-batch-btn { background: #2DB783; color: #fff; }
     #kar-batch-btn:hover:not(:disabled) { background: #269E70; }
+    #kar-outdated-btn { background: #E8912D; color: #fff; }
+    #kar-outdated-btn:hover:not(:disabled) { background: #CC7A1C; }
     #kar-audit-btn { background: #7A5AF8; color: #fff; }
     #kar-audit-btn:hover:not(:disabled) { background: #6440E5; }
     #kar-overlay { position: fixed; bottom: 66px; right: 20px; z-index: 99999;
@@ -835,6 +842,7 @@
       '<button class="kar-main-btn" id="kar-update-btn">\u2191 Update</button>' +
       '<button class="kar-main-btn" id="kar-new-btn">+ New</button>' +
       '<button class="kar-main-btn" id="kar-batch5-btn">Test 5</button>' +
+      '<button class="kar-main-btn" id="kar-outdated-btn">\u27F3 Refresh outdated</button>' +
       '<button class="kar-main-btn" id="kar-batch-btn">\u27F3 Refresh all</button>' +
       '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>';
     document.body.appendChild(bar);
@@ -846,11 +854,12 @@
     document.getElementById('kar-new-btn').addEventListener('click', () => runIntent('new'));
     document.getElementById('kar-batch5-btn').addEventListener('click', () => startBatch(5));
     document.getElementById('kar-batch-btn').addEventListener('click', () => startBatch(0));
+    document.getElementById('kar-outdated-btn').addEventListener('click', () => startBatch(0, 'outdated'));
     document.getElementById('kar-audit-btn').addEventListener('click', () => startAudit());
   }
 
   function setButtonsDisabled(disabled) {
-    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-batch5-btn', 'kar-batch-btn', 'kar-audit-btn']) {
+    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-batch5-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn']) {
       const b = document.getElementById(id);
       if (b) b.disabled = disabled;
     }
@@ -1053,6 +1062,35 @@
     });
   }
 
+  // KAs the last audit marked outdated (ka_audit tab, written by the backend).
+  function fetchOutdatedList() {
+    return new Promise((resolve, reject) => {
+      const url = 'https://docs.google.com/spreadsheets/d/' + CORPUS_SHEET_ID +
+        '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(AUDIT_TAB);
+      GM_xmlhttpRequest({
+        method: 'GET', url,
+        onload(resp) {
+          const t = resp.responseText || '';
+          if (t.slice(0, 9) === '<!DOCTYPE') { reject(new Error('No access to the sheet (sign into Google)')); return; }
+          const rows = parseCsv(t);
+          const header = (rows.shift() || []).map((h) => h.trim());
+          const sCol = header.indexOf('estado');
+          const uCol = header.indexOf('Salesforce');
+          const tCol = header.indexOf('t\u00EDtulo');
+          if (sCol === -1 || uCol === -1) { reject(new Error('No ka_audit tab yet: run \uD83D\uDCCB Audit first')); return; }
+          const list = rows.filter((r) => (r[sCol] || '').trim() === 'Desactualizado')
+            .map((r) => {
+              const u = (r[uCol] || '').trim();
+              return { url: u, title: (r[tCol] || '').trim(), recordId: (u.match(/\/(ka[0-9A-Za-z]{13,16})\//) || [])[1] || '' };
+            })
+            .filter((x) => x.recordId);
+          resolve(list);
+        },
+        onerror() { reject(new Error('Network error reading the sheet')); },
+      });
+    });
+  }
+
   function getBatch() { try { return JSON.parse(GM_getValue(K_BATCH, '') || 'null'); } catch (e) { return null; } }
   function setBatch(b) { GM_setValue(K_BATCH, b ? JSON.stringify(b) : ''); }
   function slugOf(u) {
@@ -1060,23 +1098,30 @@
     return m ? m[1] : (u || '').toLowerCase();
   }
 
-  async function startBatch(limit) {
+  // source 'outdated' = only what the last audit marked outdated;
+  // default = every Doc in ka_published (use after code/format changes).
+  async function startBatch(limit, source) {
     if (_busy) return;
+    if (getAudit() || getBatch()) { setStatus('error', 'Something else is still running in this tab.'); return; }
     const reviewer = await ensureReviewer();
     if (!reviewer) return;
     if (!(await ensureSecret())) return;
-    setStatus('loading', 'Loading the KA list\u2026');
+    const outdated = source === 'outdated';
+    setStatus('loading', outdated ? 'Loading the outdated KAs from the last audit\u2026' : 'Loading the KA list\u2026');
     let list;
-    try { list = await fetchPublishedList(); } catch (e) { setStatus('error', e.message); return; }
+    try { list = outdated ? await fetchOutdatedList() : await fetchPublishedList(); } catch (e) { setStatus('error', e.message); return; }
     if (limit) list = list.slice(0, limit);
-    if (!list.length) { setStatus('error', 'The list is empty.'); return; }
+    if (!list.length) {
+      setStatus(outdated ? 'success' : 'error', outdated ? 'Nothing outdated in the last audit.' : 'The list is empty.');
+      return;
+    }
     const mins = Math.max(1, Math.ceil((list.length * 8) / 60));
     if (!window.confirm('Refresh ' + list.length + ' KA' + (list.length > 1 ? 's' : '') +
       ' in place?\n\nThis re-opens each KA and re-syncs its Doc (~' + mins + ' min).\n' +
       'Keep this tab on Salesforce and don\u2019t close it.')) {
       setStatus('idle', 'Cancelled.'); return;
     }
-    setBatch({ active: true, list, idx: 0, reviewer, ok: 0, fail: 0, skip: 0 });
+    setBatch({ active: true, list, idx: 0, reviewer, ok: 0, fail: 0, skip: 0, source: outdated ? 'outdated' : 'all' });
     location.href = list[0].url;
   }
 
@@ -1094,7 +1139,10 @@
     let ka = null;
     for (let i = 0; i < 40; i++) {
       const cur = _readKa();
-      if (cur && cur.title && slugOf(cur.url) === slugOf(target.url)) { ka = cur; break; }
+      const isTarget = target.recordId
+        ? location.href.indexOf(target.recordId) !== -1      // record link (outdated list)
+        : slugOf(cur && cur.url) === slugOf(target.url);     // article link (ka_published)
+      if (cur && cur.title && isTarget) { ka = cur; break; }
       await sleep(500);
     }
 
@@ -1129,7 +1177,9 @@
     if (body) {
       body.innerHTML = '<div class="kar-title success">\u2713 Batch done</div>' +
         '<div style="font-size:12px;color:#5B5D62">' + b.ok + ' updated \u00B7 ' + b.fail +
-        ' failed \u00B7 ' + b.skip + ' skipped (of ' + b.list.length + ')</div>' + _reviewerFooter();
+        ' failed \u00B7 ' + b.skip + ' skipped (of ' + b.list.length + ')</div>' +
+        (b.source === 'outdated' ? '<div style="font-size:12px;color:#5B5D62;margin-top:4px">Run \uD83D\uDCCB Audit again to update the sheet.</div>' : '') +
+        _reviewerFooter();
       _showOverlay(); _wireReviewerLink();
     }
   }

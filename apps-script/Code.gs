@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.3.0)
+ * KA Sync v2 — Google Apps Script backend (v2.3.1)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,12 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.3.1 (audit)
+ *   - "Outdated" now checks the version: when the Doc header's "Version"
+ *     equals Salesforce's VersionNumber the content did not change (only the
+ *     date moved), so it is not outdated. 10-minute tolerance on dates.
+ *   - KA numbers keep their leading zeros in the ka_audit tab.
  *
  * Targets the PRODUCTION KA folder (Shared Drive) — all Drive calls use
  * supportsAllDrives.
@@ -535,6 +541,8 @@ var AUDIT_REPORTS = [
   { team: 'Trust & Safety', reportId: '00OVx000006ORWfMAO', label: 'T&S KAs: Active' },
 ];
 var TEAM_ALIASES = { 'Sales': 'GTM' };
+// A Doc synced a few minutes before the last Salesforce save is not outdated.
+var OUTDATED_TOLERANCE_MS = 10 * 60 * 1000;
 
 // Most urgent first. Each KA gets one row with its most urgent status.
 var AUDIT_STATUSES = [
@@ -604,9 +612,11 @@ function _auditDocs(folderId) {
  *   reports:   [{ team, rows: [{ recordId, urlName, title }] }]
  *   published: [{ id, articleNumber, title, urlName, version, lastModified }]
  *   pubDocs / arcDocs: output of _auditDocs
+ *   opts.docVersion(docId) (optional): the "Version" in the Doc header, or ''
  * Returns { rows: [...], counts: { STATUS: n } }.
  */
-function runAudit(reports, published, pubDocs, arcDocs) {
+function runAudit(reports, published, pubDocs, arcDocs, opts) {
+  opts = opts || {};
   var pubById = {};
   for (var p = 0; p < published.length; p++) pubById[published[p].id] = published[p];
 
@@ -662,9 +672,17 @@ function runAudit(reports, published, pubDocs, arcDocs) {
         used[doc.docId] = true;
         var found = [];
         var sfMs = ka.lastModified ? Date.parse(ka.lastModified) : 0;
-        if (sfMs && doc.modifiedMs && doc.modifiedMs < sfMs) {
-          found.push('OUTDATED');
-          notes.push('Cambió en Salesforce después del último sync');
+        if (sfMs && doc.modifiedMs && sfMs - doc.modifiedMs > OUTDATED_TOLERANCE_MS) {
+          // Same version in the Doc header and in Salesforce = same content.
+          var docV = opts.docVersion ? String(opts.docVersion(doc.docId) || '') : '';
+          var sfV = info.version != null ? String(info.version) : '';
+          if (docV && sfV && docV === sfV) {
+            notes.push('Misma versión (v' + sfV + '): en Salesforce solo cambió la fecha');
+          } else {
+            found.push('OUTDATED');
+            notes.push(docV && sfV ? 'Doc en v' + docV + ', Salesforce en v' + sfV
+                                   : 'Cambió en Salesforce después del último sync');
+          }
         }
         if (doc.team && doc.team !== team) {
           found.push('WRONG_TEAM');
@@ -735,7 +753,7 @@ function handleAudit(req) {
 
   var pubDocs = _auditDocs(KA_FOLDER_ID);
   var arcDocs = _auditDocs(ARCHIVED_FOLDER_ID);
-  var result = runAudit(req.reports, req.published || [], pubDocs, arcDocs);
+  var result = runAudit(req.reports, req.published || [], pubDocs, arcDocs, { docVersion: _docHeaderVersion });
 
   var now = Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm');
   var by = (req.by || 'unknown').toString();
@@ -752,6 +770,19 @@ function handleAudit(req) {
   };
 }
 
+// "Version: N" from the Doc's page header ('' when it is not there).
+function _docHeaderVersion(docId) {
+  try {
+    var doc = DocumentApp.openById(docId);
+    var header = doc.getHeader();
+    var text = header ? header.getText() : '';
+    var m = text.match(/Version:\s*(\d+)/i);
+    return m ? m[1] : '';
+  } catch (e) {
+    return '';
+  }
+}
+
 function _fmtIso(iso) {
   if (!iso) return '';
   var ms = Date.parse(iso);
@@ -764,7 +795,8 @@ function _writeAuditTab(ss, rows, now) {
   var data = rows.map(function (r) {
     var ka = r.ka || {}, doc = r.doc;
     return [
-      _statusInfo(r.status).label, ka.team || '', ka.title || '', ka.articleNumber || '',
+      // Leading apostrophe keeps "000015509" as text (no lost zeros).
+      _statusInfo(r.status).label, ka.team || '', ka.title || '', ka.articleNumber ? "'" + ka.articleNumber : '',
       ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + ka.recordId + '/view' : '',
       doc ? 'https://docs.google.com/document/d/' + doc.docId + '/edit' : '',
       _fmtIso(ka.lastModified),

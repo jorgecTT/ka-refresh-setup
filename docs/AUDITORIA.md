@@ -9,7 +9,7 @@ Compara cada semana los **reportes del Content Index** (GTM, Support y T&S) con 
 | En Salesforce sin Doc | Está en un reporte, pero no tiene Doc en la carpeta de publicados | Abrir el KA y darle **+ New** |
 | Archivado por error | Su Doc está en la carpeta de archivados, pero el KA sigue en el reporte | Regresar el Doc a publicados |
 | Docs duplicados | Hay más de un Doc para el mismo KA | Borrar los sobrantes |
-| Desactualizado | El KA cambió en Salesforce después del último cambio del Doc | Abrir el KA y darle **↑ Update** |
+| Desactualizado | El KA tiene una versión más nueva en Salesforce que la del Doc (si la versión es la misma, sale OK) | **⟳ Refresh outdated** o **↑ Update** en el KA |
 | Equipo distinto | El nombre del Doc dice un equipo y el reporte otro | Revisar con el equipo |
 | Doc de más | Tiene Doc, pero el KA ya no está en ningún reporte | Revisar si hay que archivarlo |
 | Doc sin datos del KA | El Doc no tiene guardado su número de KA ni su URL Name | Darle **↑ Update** a su KA |
@@ -26,8 +26,8 @@ No cambia nada ni en Salesforce ni en Drive: solo lee y escribe en el sheet.
 
 ## Piezas
 
-- `apps-script/Code.gs`: el Google Script (v2.3.0). Acción `audit`, pestañas `ka_audit` y `ka_audit_log`, correo y recordatorio semanal (`setupAuditReminderTrigger`).
-- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.2.0) con el botón **📋 Audit**. Se actualiza sola desde GitHub.
+- `apps-script/Code.gs`: el Google Script (v2.3.1). Acción `audit`, pestañas `ka_audit` y `ka_audit_log`, correo y recordatorio semanal (`setupAuditReminderTrigger`).
+- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.3.0) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
 - `tests/`: pruebas sin conexión (`node tests/apps-script.test.js`) y de punta a punta en Chromium (`node tests/audit-e2e.test.js`).
 
 ## Configuración (Script Properties del Google Script)
