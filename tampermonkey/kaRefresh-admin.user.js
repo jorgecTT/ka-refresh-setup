@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.3.0
+// @version      2.3.1
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -52,6 +52,13 @@
  * v2.2.2 - Audit: long reports (Support, 170+ rows) load in batches; the
  *   reader now waits at the bottom, follows a swapped table and retries.
  *
+ * v2.3.1 - Audit: read ONLY the report being audited. The console keeps the
+ *   previous report tab loaded, and the reader could pick up its table (or
+ *   its "Total Records") while the next one opened, mixing rows between
+ *   reports. Now the table must come from the frame of this report's ID,
+ *   rows start over if the table moves to another frame, and a report whose
+ *   total can't be read is retried instead of trusted.
+ *
  * v2.3.0 - "Refresh outdated": re-syncs only the KAs the last audit marked
  *   "Desactualizado" (ka_audit tab). "Refresh all" stays for code/format
  *   changes that need every Doc rebuilt.
@@ -92,7 +99,7 @@
     { team: 'Trust & Safety', reportId: '00OVx000006ORWfMAO', label: 'T&S KAs: Active' },
   ];
 
-  console.log('[KA Refresh] v2.3.0 loaded (admin)');
+  console.log('[KA Refresh] v2.3.1 loaded (admin)');
 
   function walkAll(root, callback, depth) {
     if (depth > 30 || !root) return;
@@ -1319,12 +1326,27 @@
     return null;
   }
 
+  // The frame (document) a report renders in carries its ID in its URL or in
+  // the src of the iframe around it. Salesforce IDs: match on the first 15 chars.
+  function docMatchesReport(doc, reportId) {
+    const id = String(reportId || '').slice(0, 15);
+    if (!id) return false;
+    try {
+      if ((doc.location && doc.location.href || '').indexOf(id) !== -1) return true;
+      const fe = doc.defaultView && doc.defaultView.frameElement;
+      if (fe && (fe.getAttribute('src') || '').indexOf(id) !== -1) return true;
+    } catch (e) { /* cross-origin */ }
+    return false;
+  }
+
   // Largest visible table (the console keeps other report tabs loaded but hidden).
-  function findReportTable() {
+  // With strict=true only frames that belong to reportId count.
+  function findReportTable(reportId, strict) {
     const docs = [];
     collectDocs(document, docs, 0);
     let best = null;
     for (const d of docs) {
+      if (strict && !docMatchesReport(d, reportId)) continue;
       const tables = [];
       collectTables(d, tables, 0);
       for (const t of tables) {
@@ -1345,15 +1367,18 @@
   // to fetch the next rows, and it may swap the table element meanwhile. So:
   // re-find the table every step, wait at the bottom, give up on a pass only
   // after 15 s without new rows, and do up to 3 passes from the top.
-  async function readReportTable(onProgress) {
-    let best = findReportTable();
+  // Rows and the total always come from ONE frame; if the table shows up in a
+  // different frame, start over there (never mix two reports).
+  async function readReportTable(reportId, strict, onProgress) {
+    let best = findReportTable(reportId, strict);
     if (!best) return { ok: false, why: 'the report table is not on screen yet' };
     let total = reportTotal(best.doc);
+    if (total === null) return { ok: false, why: 'the report total ("Total Records") is not on screen yet' };
     const rows = new Map();
     readRows(best.t, rows);
     if (!rows.size) return { ok: false, why: 'the report rows have no KA links yet' };
     const STALL_MS = 15000;
-    const done = () => total !== null && rows.size >= total;
+    const done = () => rows.size >= total;
     const scrollerOf = (b) => scrollParent(b.t) || b.doc.scrollingElement;
 
     for (let pass = 0; pass < 3 && !done(); pass++) {
@@ -1372,17 +1397,21 @@
           scroller.scrollTop = scroller.scrollHeight;
           await sleep(500);
         }
-        const fresh = findReportTable();
+        const fresh = findReportTable(reportId, strict);
         if (fresh) {
-          if (fresh.t !== best.t || fresh.doc !== best.doc) { best = fresh; scroller = scrollerOf(best); }
-          if (total === null) total = reportTotal(best.doc);
+          if (fresh.doc !== best.doc) {
+            // Another frame: its rows belong to a different load of the page. Start over.
+            const t2 = reportTotal(fresh.doc);
+            if (t2 === null) continue;
+            best = fresh; scroller = scrollerOf(best); total = t2; rows.clear(); lastNew = Date.now();
+          } else if (fresh.t !== best.t) { best = fresh; scroller = scrollerOf(best); }
         }
         if (readRows(best.t, rows) > 0) lastNew = Date.now();
         if (onProgress) onProgress(rows.size, total);
       }
     }
     try { scrollerOf(best).scrollTop = 0; } catch (e) { /* table gone */ }
-    return { ok: true, rows: Array.from(rows.values()), total: total };
+    return { ok: true, rows: Array.from(rows.values()), total: total, strict: strict };
   }
 
   // -- Audit flow --
@@ -1425,9 +1454,14 @@
 
     setAuditStatus(a, 'Opening report ' + (a.idx + 1) + ' of ' + a.reports.length, rep.label);
     let res = null;
+    // Give the new tab a moment, so the previous report's tab is hidden first.
+    await sleep(2000);
     for (let i = 0; i < 60; i++) {
       if (!getAudit()) return;                    // stopped
-      res = await readReportTable((n, total) =>
+      // First 20 s: only a frame that carries this report's ID counts. After
+      // that, if no frame carries it, fall back to the visible table.
+      const strict = i < 20 || !!findReportTable(rep.reportId, true);
+      res = await readReportTable(rep.reportId, strict, (n, total) =>
         setAuditStatus(a, 'Reading report ' + (a.idx + 1) + ' of ' + a.reports.length,
           rep.label + ': ' + n + (total ? ' of ' + total : '') + ' rows'));
       if (res.ok) break;
@@ -1435,7 +1469,7 @@
     }
     if (!getAudit()) return;
     if (!res || !res.ok) { failAudit('could not read "' + rep.label + '" (' + (res ? res.why : 'no answer') + ').'); return; }
-    if (res.total !== null && res.rows.length < res.total) {
+    if (res.total === null || res.rows.length < res.total) {
       failAudit('"' + rep.label + '" only showed ' + res.rows.length + ' of ' + res.total + ' rows. Try again.');
       return;
     }
@@ -1452,6 +1486,20 @@
   }
 
   async function finishAudit(a) {
+    // Each KA lives in one team's report. The same KA in two reports means a
+    // report was read from the wrong tab: stop instead of writing bad results.
+    const seen = {};
+    for (const r of a.reports) {
+      let shared = 0, other = '';
+      for (const row of (r.rows || [])) {
+        if (seen[row.recordId] && seen[row.recordId] !== r.label) { shared++; other = seen[row.recordId]; }
+        seen[row.recordId] = seen[row.recordId] || r.label;
+      }
+      if (shared >= 5) {
+        failAudit('"' + r.label + '" came back with ' + shared + ' of the same KAs as "' + other + '", so one report was read from the wrong tab. Nothing was written. Run the audit again.');
+        return;
+      }
+    }
     setAuditStatus(a, 'Comparing with Drive\u2026', 'Writing the ka_audit tab');
     let res;
     try {

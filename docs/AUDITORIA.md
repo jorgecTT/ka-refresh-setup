@@ -27,7 +27,7 @@ No cambia nada ni en Salesforce ni en Drive: solo lee y escribe en el sheet.
 ## Piezas
 
 - `apps-script/Code.gs`: el Google Script (v2.3.1). Acción `audit`, pestañas `ka_audit` y `ka_audit_log`, correo y recordatorio semanal (`setupAuditReminderTrigger`).
-- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.3.0) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
+- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.3.1) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
 - `tests/`: pruebas sin conexión (`node tests/apps-script.test.js`) y de punta a punta en Chromium (`node tests/audit-e2e.test.js`).
 
 ## Configuración (Script Properties del Google Script)

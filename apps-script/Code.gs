@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.3.1)
+ * KA Sync v2 — Google Apps Script backend (v2.3.2)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,12 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.3.2 (audit)
+ *   - Safety stop: when a team suddenly has many "Doc de más" (more than
+ *     AUDIT_MAX_EXTRA_PER_TEAM), its report was not read completely (or was
+ *     read from the wrong tab). The audit is rejected and nothing is written,
+ *     so a bad read never replaces a good ka_audit tab.
  *
  * v2.3.1 (audit)
  *   - "Outdated" now checks the version: when the Doc header's "Version"
@@ -747,6 +753,23 @@ function _validateAuditRequest(req) {
   return '';
 }
 
+// A normal week has a handful of extra Docs per team. Dozens in one team means
+// that team's report was only partly read: never save that as the audit.
+var AUDIT_MAX_EXTRA_PER_TEAM = 10;
+
+function _suspectAudit(rows) {
+  var extra = {};
+  rows.forEach(function (r) {
+    if (r.status !== 'EXTRA_DOC') return;
+    var t = (r.ka && r.ka.team) || 'unknown';
+    extra[t] = (extra[t] || 0) + 1;
+  });
+  var bad = Object.keys(extra).filter(function (t) { return extra[t] > AUDIT_MAX_EXTRA_PER_TEAM; });
+  if (!bad.length) return '';
+  return bad.map(function (t) { return extra[t] + ' ' + t + ' Docs are missing from the ' + t + ' report'; }).join('; ') +
+    '. That report was not read completely. Nothing was written. Run the audit again.';
+}
+
 function handleAudit(req) {
   var problem = _validateAuditRequest(req);
   if (problem) return { ok: false, code: 'BAD_REQUEST', error: problem };
@@ -754,6 +777,8 @@ function handleAudit(req) {
   var pubDocs = _auditDocs(KA_FOLDER_ID);
   var arcDocs = _auditDocs(ARCHIVED_FOLDER_ID);
   var result = runAudit(req.reports, req.published || [], pubDocs, arcDocs, { docVersion: _docHeaderVersion });
+  var suspect = _suspectAudit(result.rows);
+  if (suspect) return { ok: false, code: 'INCOMPLETE_REPORT', error: suspect, counts: result.counts };
 
   var now = Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm');
   var by = (req.by || 'unknown').toString();

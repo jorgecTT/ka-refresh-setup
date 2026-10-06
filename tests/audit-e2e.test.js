@@ -76,8 +76,15 @@ function reportFrame(team) {
     const u = new URL(r.request().url());
     if (u.pathname.startsWith('/frame/')) return r.fulfill({ contentType: 'text/html', body: reportFrame(REPORTS[u.pathname.split('/')[2]]) });
     const rep = u.pathname.match(/\/lightning\/r\/Report\/([^/]+)\//);
-    if (rep) return r.fulfill({ contentType: 'text/html',
-      body: '<html><body><h1>Report</h1><iframe src="/frame/' + rep[1] + '" style="width:900px;height:600px"></iframe></body></html>' });
+    if (rep) {
+      // Like the Salesforce console: the PREVIOUS report's tab is still loaded
+      // and visible for a few seconds after the next one opens.
+      const ids = Object.keys(REPORTS), prev = ids[ids.indexOf(rep[1]) - 1];
+      const stale = prev ? '<iframe id="stale" src="/frame/' + prev + '" style="width:900px;height:700px"></iframe>' +
+        '<script>setTimeout(function(){ document.getElementById("stale").style.display="none"; }, 6000);</script>' : '';
+      return r.fulfill({ contentType: 'text/html',
+        body: '<html><body><h1>Report</h1>' + stale + '<iframe src="/frame/' + rep[1] + '" style="width:900px;height:600px"></iframe></body></html>' });
+    }
     // Like the real org: /list-info answers 404, /list-ui has the views.
     if (u.pathname.endsWith('/ui-api/list-info/Knowledge__kav')) return r.fulfill({ status: 404, contentType: 'application/json',
       body: '[{"errorCode":"NOT_FOUND","message":"The requested resource does not exist"}]' });
@@ -95,7 +102,7 @@ function reportFrame(team) {
   });
 
   // Tampermonkey stand-in: GM storage in localStorage (same origin for all pages), Apps Script via __backend.
-  const script = fs.readFileSync(path.join(__dirname, '..', 'tampermonkey', 'kaRefresh-admin.user.js'), 'utf8');
+  const script = fs.readFileSync(process.env.SCRIPT || path.join(__dirname, '..', 'tampermonkey', 'kaRefresh-admin.user.js'), 'utf8');
   await page.addInitScript({ content: `
     window.unsafeWindow = window;
     window.GM_getValue = (k, d) => { const v = localStorage.getItem('gm_' + k); return v === null ? d : v; };

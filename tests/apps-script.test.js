@@ -301,5 +301,20 @@ test('audit refuses when a team report is missing', () => {
   assert.ok(/Missing report: Trust & Safety/.test(r.error), r.error);
 });
 
+test('audit refuses a report that came back short (many extra Docs in one team)', () => {
+  const fx = auditFixture();
+  // 12 T&S Docs whose KAs are "in no report": what a half-read T&S report looks like.
+  for (let i = 0; i < 12; i++) {
+    fx.files['ts' + i] = { folder: PUB, title: 'TS ' + i + ' - internal - Trust & Safety - EN', description: meta('00090' + i, 'TS-' + i), modifiedDate: '2026-09-10T00:00:00Z' };
+  }
+  const { g, sheets, mails } = loadBackend({ files: fx.files, props: { SHARED_SECRET: 's' } });
+  const r = post(g, { secret: 's', action: 'audit', reports: fx.reports, published: fx.published, by: 'J' });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.code, 'INCOMPLETE_REPORT');
+  assert.ok(/12 Trust & Safety Docs are missing from the Trust & Safety report/.test(r.error), r.error);
+  assert.ok(!sheets.ka_audit && !sheets.ka_audit_log, 'nothing written');
+  assert.strictEqual(mails.length, 0, 'no email');
+});
+
 module.exports = { loadBackend, post };
 if (require.main === module) console.log('\n' + passed + ' passed');
