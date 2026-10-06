@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.2.0
+// @version      2.2.1
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -46,6 +46,9 @@
  *   - The sync key is no longer in the code: asked once and kept in this
  *     browser (Tampermonkey menu -> "Change sync key" to replace it).
  *
+ * v2.2.1 - Audit: the list of Knowledge views falls back to /list-ui when
+ *   /list-info answers 404 (it does in this org).
+ *
  * Reviewer: asked once, remembered. Click the reviewer name in the status
  * overlay to change it. Audience: asked only when CREATING a new Doc.
  */
@@ -81,7 +84,7 @@
     { team: 'Trust & Safety', reportId: '00OVx000006ORWfMAO', label: 'T&S KAs: Active' },
   ];
 
-  console.log('[KA Refresh] v2.2.0 loaded (admin)');
+  console.log('[KA Refresh] v2.2.1 loaded (admin)');
 
   function walkAll(root, callback, depth) {
     if (depth > 30 || !root) return;
@@ -1173,8 +1176,20 @@
   // Every published KA with number, URL Name and exact last-modified time.
   async function fetchPublishedArticles() {
     const base = '/services/data/v59.0/ui-api';
-    const info = await uiApiGet(base + '/list-info/Knowledge__kav?recentListsOnly=false');
-    const views = (info.lists || []).map(v => ({ apiName: v.apiName, label: v.label || '' })).filter(v => v.apiName);
+    // Two ways to list the views; in Thumbtack's org /list-info answers 404 and
+    // /list-ui works (seen with the probe), so try both.
+    let views = [];
+    let lastErr = null;
+    for (const path of ['/list-info/Knowledge__kav?recentListsOnly=false', '/list-ui/Knowledge__kav?pageSize=200']) {
+      try {
+        const info = await uiApiGet(base + path);
+        const coll = (info.lists && info.lists.lists) || info.lists || info.listInfoBatch || [];
+        views = coll.map(v => ({ apiName: v.apiName || (v.listReference && v.listReference.listViewApiName),
+                                 label: v.label || '' })).filter(v => v.apiName);
+        if (views.length) break;
+      } catch (e) { lastErr = e; }
+    }
+    if (!views.length) throw new Error('Could not read the Knowledge list views' + (lastErr ? ' (' + lastErr.message + ')' : ''));
     const view = views.find(v => /^published articles$/i.test(v.label.trim())) || views.find(v => /publish/i.test(v.label));
     if (!view) throw new Error('The "Published Articles" list view was not found');
     const fields = ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate']

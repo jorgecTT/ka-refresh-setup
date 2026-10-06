@@ -70,7 +70,10 @@ function reportFrame(team) {
     const rep = u.pathname.match(/\/lightning\/r\/Report\/([^/]+)\//);
     if (rep) return r.fulfill({ contentType: 'text/html',
       body: '<html><body><h1>Report</h1><iframe src="/frame/' + rep[1] + '" style="width:900px;height:600px"></iframe></body></html>' });
-    if (u.pathname.endsWith('/ui-api/list-info/Knowledge__kav')) return r.fulfill({ contentType: 'application/json',
+    // Like the real org: /list-info answers 404, /list-ui has the views.
+    if (u.pathname.endsWith('/ui-api/list-info/Knowledge__kav')) return r.fulfill({ status: 404, contentType: 'application/json',
+      body: '[{"errorCode":"NOT_FOUND","message":"The requested resource does not exist"}]' });
+    if (u.pathname.endsWith('/ui-api/list-ui/Knowledge__kav')) return r.fulfill({ contentType: 'application/json',
       body: JSON.stringify({ lists: [{ apiName: 'Recent', label: 'Recently Viewed' }, { apiName: 'Published_Articles', label: 'Published Articles' }] }) });
     if (u.pathname.includes('/ui-api/list-records/Knowledge__kav/Published_Articles')) {
       const page2 = u.searchParams.get('pageToken') === '200';
