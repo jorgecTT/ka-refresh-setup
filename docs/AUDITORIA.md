@@ -24,10 +24,21 @@ Compara cada semana los **reportes del Content Index** (GTM, Support y T&S) con 
 
 No cambia nada ni en Salesforce ni en Drive: solo lee y escribe en el sheet.
 
+## Arreglar lo pendiente de un clic
+
+Después de la auditoría, el botón **✓ Fix from audit** muestra lo que salió pendiente con lo que va a hacer en cada uno:
+
+- **En Salesforce sin Doc** → **+ New** (con el equipo del reporte)
+- **Desactualizado** → **↑ Update**
+- **Doc de más** → **Archive Doc** (viene sin marcar: márcalo solo si el KA ya se archivó en Salesforce)
+- Lo demás (duplicados, equipo distinto…) sale como **By hand**: hay que revisarlo a mano.
+
+Marca los que aceptas y dale **Do selected**. Al terminar, corre la auditoría otra vez.
+
 ## Piezas
 
 - `apps-script/Code.gs`: el Google Script (v2.3.1). Acción `audit`, pestañas `ka_audit` y `ka_audit_log`, correo y recordatorio semanal (`setupAuditReminderTrigger`).
-- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.4.0) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
+- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.5.0) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
 - `tests/`: pruebas sin conexión (`node tests/apps-script.test.js`) y de punta a punta en Chromium (`node tests/audit-e2e.test.js`).
 
 ## Configuración (Script Properties del Google Script)

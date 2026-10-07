@@ -1,7 +1,8 @@
-// End-to-end test of "Refresh outdated" in the admin userscript: it must read
-// the ka_audit tab, open ONLY the "Desactualizado" KAs by their record link,
-// and send one sync per KA with the content read from the page.
-// Run: node tests/refresh-outdated-e2e.test.js   (needs Playwright + Chromium)
+// End-to-end test of "Fix from audit" in the admin userscript: it lists the
+// flagged rows of ka_audit, you tick what you accept, and it creates the
+// missing Docs (with the report's team), updates the outdated ones and
+// archives the extra Docs you ticked. Rows it can't fix are not selectable.
+// Run: node tests/fix-from-audit-e2e.test.js   (needs Playwright + Chromium)
 
 const fs = require('fs');
 const path = require('path');
@@ -15,10 +16,15 @@ const KAS = {
   ka2Vx0000000000BBB: { title: 'Leads (Pro)', num: '000007636', slug: 'Leads-Pro', version: '45' },
   ka2Vx0000000000CCC: { title: 'Already fine', num: '000001111', slug: 'Fine', version: '3' },
 };
+const DOC = 'https://docs.google.com/document/d/1YVAvTzKSBcq5sMy82q31hG0C_BOAwutpnKRdSXN88zM/edit';
+const rec = id => SF + '/lightning/r/Knowledge__kav/' + id + '/view';
 const AUDIT_CSV = [
   '"estado","equipo","título","número KA","Salesforce","Doc","modificado en Salesforce","último cambio del Doc","nota","auditado"',
-  ...Object.entries(KAS).map(([id, k], i) =>
-    `"${i < 2 ? 'Desactualizado' : 'OK'}","Trust & Safety","${k.title}","${k.num}","${SF}/lightning/r/Knowledge__kav/${id}/view","","","","",""`),
+  `"En Salesforce sin Doc","Trust & Safety","Pro reports","000008319","${rec('ka2Vx0000000000AAA')}","","","","",""`,
+  `"Desactualizado","Support Ops","Leads (Pro)","000007636","${rec('ka2Vx0000000000BBB')}","https://docs.google.com/document/d/1aaaaaaaaaaaaaaaaaaaaaaaaaaaa/edit","","","",""`,
+  `"Doc de más (no está en reportes)","Trust & Safety","Incident mediation","000008310","","${DOC}","","","",""`,
+  `"Docs duplicados","GTM","Two docs","000009999","${rec('ka2Vx0000000000CCC')}","","","","",""`,
+  `"OK","GTM","Already fine","000001111","${rec('ka2Vx0000000000CCC')}","","","","",""`,
 ].join('\n');
 
 // Just enough of a Lightning record page for the script's field readers.
@@ -40,11 +46,12 @@ function kaPage(id) {
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   page.on('dialog', d => d.accept());
-  const syncs = [];
+  const syncs = [], archives = [];
   await page.exposeFunction('__gm', (url, body) => {
     if (/docs\.google\.com\/spreadsheets/.test(url)) return AUDIT_CSV;
     const req = JSON.parse(body);
     if (req.action === 'sync') syncs.push(req);
+    if (req.action === 'archive') { archives.push(req); return JSON.stringify({ ok: true, moved: req.docIds.length }); }
     return JSON.stringify({ ok: true, mode: 'update', filename: req.title, docUrl: 'https://docs.google.com/document/d/x/edit' });
   });
   await page.route(SF + '/**', r => {
@@ -66,18 +73,27 @@ function kaPage(id) {
   await page.goto(SF + '/lightning/r/Knowledge__kav/ka2Vx0000000000CCC/view');
   await page.evaluate(() => { localStorage.setItem('gm_KAR2_reviewer', 'Jorge'); localStorage.setItem('gm_KAR2_secret', 'k'); });
   await page.reload();
-  await page.waitForSelector('#kar-outdated-btn', { timeout: 10000 });
-  await page.click('#kar-outdated-btn');
-  await page.waitForFunction(() => /Batch done/.test((document.getElementById('kar-overlay-body') || {}).innerText || ''), null, { timeout: 120000 });
+  await page.waitForSelector('#kar-fix-btn', { timeout: 10000 });
+  await page.click('#kar-fix-btn');
+  await page.waitForSelector('#kar-fix-go');
+  const list = await page.$$eval('.kar-fix-list label', ls => ls.map(l => [l.innerText.replace(/\s+/g, ' ').trim(), l.querySelector('input').checked, l.querySelector('input').disabled]));
+  console.log(list);
+  assert.strictEqual(list.length, 4, 'OK rows are not listed');
+  assert.deepStrictEqual(list.map(x => [x[1], x[2]]), [[true, false], [true, false], [false, false], [false, true]],
+    'create/update ticked, archive unticked by default, duplicates not selectable');
+  await page.check('.kar-fix-list input[data-i="2"]');   // accept the archive
+  assert.strictEqual(await page.$eval('#kar-fix-go', b => b.textContent), 'Do selected (3)');
+  await page.click('#kar-fix-go');
+  await page.waitForFunction(() => /Fixes done/.test((document.getElementById('kar-overlay-body') || {}).innerText || ''), null, { timeout: 120000 });
   const overlay = await page.$eval('#kar-overlay-body', b => b.innerText);
   console.log(overlay);
 
-  assert.deepStrictEqual(syncs.map(s => s.title), ['Pro reports', 'Leads (Pro)'], 'only the outdated KAs are synced');
-  assert.deepStrictEqual(syncs.map(s => s.kaId), ['000008319', '000007636']);
-  assert.deepStrictEqual(syncs.map(s => s.url), [SF + '/articles/Knowledge/Pro-reports', SF + '/articles/Knowledge/Leads-Pro']);
-  assert.ok(syncs.every(s => s.secret === 'k' && s.mode === 'update' && /Overview/.test(s.html)));
-  assert.ok(/2 synced/.test(overlay) && /Audit again/.test(overlay), overlay);
+  assert.deepStrictEqual(archives.map(a => a.docIds), [['1YVAvTzKSBcq5sMy82q31hG0C_BOAwutpnKRdSXN88zM']]);
+  assert.strictEqual(archives[0].by, 'Jorge');
+  assert.deepStrictEqual(syncs.map(s => [s.title, s.mode, s.audience]), [['Pro reports', 'create', 'Trust & Safety'], ['Leads (Pro)', 'update', '']]);
+  assert.ok(syncs.every(s => s.secret === 'k' && /Overview/.test(s.html)));
+  assert.ok(/2 synced/.test(overlay) && /1 Doc\(s\) archived/.test(overlay) && /Audit again/.test(overlay), overlay);
   assert.deepStrictEqual(errors, []);
   await browser.close();
-  console.log('\nrefresh outdated e2e ok');
+  console.log('\nfix from audit e2e ok');
 })().catch(e => { console.error('FAIL', e); process.exit(1); });

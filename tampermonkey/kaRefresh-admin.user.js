@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.4.0
+// @version      2.5.0
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -51,6 +51,11 @@
  *
  * v2.2.2 - Audit: long reports (Support, 170+ rows) load in batches; the
  *   reader now waits at the bottom, follows a swapped table and retries.
+ *
+ * v2.5.0 - "Fix from audit": lists what the last audit flagged, you tick the
+ *   ones you accept, and it does them in one go: + New for "En Salesforce
+ *   sin Doc" (with the team from the report), Update for "Desactualizado",
+ *   Archive for "Doc de más". Anything else is listed to do by hand.
  *
  * v2.4.0 - Audit, one report at a time: read it, save it, VERIFY it, then go
  *   to the next. Verify = the rows match the Docs Drive has for that team
@@ -106,7 +111,7 @@
     { team: 'Trust & Safety', reportId: '00OVx000006ORWfMAO', label: 'T&S KAs: Active' },
   ];
 
-  console.log('[KA Refresh] v2.4.0 loaded (admin)');
+  console.log('[KA Refresh] v2.5.0 loaded (admin)');
 
   function walkAll(root, callback, depth) {
     if (depth > 30 || !root) return;
@@ -802,6 +807,14 @@
     #kar-batch-btn:hover:not(:disabled) { background: #269E70; }
     #kar-outdated-btn { background: #E8912D; color: #fff; }
     #kar-outdated-btn:hover:not(:disabled) { background: #CC7A1C; }
+    #kar-fix-btn { background: #1E8E3E; color: #fff; }
+    #kar-fix-btn:hover:not(:disabled) { background: #176F30; }
+    .kar-fix-list { max-height: 46vh; overflow: auto; margin: 6px 0; border-top: 1px solid #E8E9EB; }
+    .kar-fix-list label { display: flex; gap: 8px; align-items: flex-start; padding: 6px 2px; border-bottom: 1px solid #F0F1F2; cursor: pointer; }
+    .kar-fix-list label.off { cursor: default; color: #8A8D93; }
+    .kar-fix-list .kar-act { font-size: 11px; font-weight: 700; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+    .kar-act.create { background: #E3F5EA; color: #176F30; } .kar-act.update { background: #FFF3DC; color: #8A5300; }
+    .kar-act.archive { background: #E8F0FB; color: #2A5A9C; } .kar-act.manual { background: #F0F1F2; color: #5B5D62; }
     #kar-audit-btn { background: #7A5AF8; color: #fff; }
     #kar-audit-btn:hover:not(:disabled) { background: #6440E5; }
     #kar-overlay { position: fixed; bottom: 66px; right: 20px; z-index: 99999;
@@ -858,7 +871,8 @@
       '<button class="kar-main-btn" id="kar-batch5-btn">Test 5</button>' +
       '<button class="kar-main-btn" id="kar-outdated-btn">\u27F3 Refresh outdated</button>' +
       '<button class="kar-main-btn" id="kar-batch-btn">\u27F3 Refresh all</button>' +
-      '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>';
+      '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>' +
+      '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>';
     document.body.appendChild(bar);
     const overlay = document.createElement('div');
     overlay.id = 'kar-overlay';
@@ -870,10 +884,11 @@
     document.getElementById('kar-batch-btn').addEventListener('click', () => startBatch(0));
     document.getElementById('kar-outdated-btn').addEventListener('click', () => startBatch(0, 'outdated'));
     document.getElementById('kar-audit-btn').addEventListener('click', () => startAudit());
+    document.getElementById('kar-fix-btn').addEventListener('click', () => openFixList());
   }
 
   function setButtonsDisabled(disabled) {
-    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-batch5-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn']) {
+    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-batch5-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn', 'kar-fix-btn']) {
       const b = document.getElementById(id);
       if (b) b.disabled = disabled;
     }
@@ -1105,6 +1120,99 @@
     });
   }
 
+  // Every flagged row of the last audit, with what the script can do about it.
+  const FIX_ACTIONS = {
+    'En Salesforce sin Doc': 'create', 'Desactualizado': 'update', 'Doc de más': 'archive',
+  };
+  function fetchAuditRows() {
+    return new Promise((resolve, reject) => {
+      const url = 'https://docs.google.com/spreadsheets/d/' + CORPUS_SHEET_ID +
+        '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(AUDIT_TAB);
+      GM_xmlhttpRequest({
+        method: 'GET', url,
+        onload(resp) {
+          const t = resp.responseText || '';
+          if (t.slice(0, 9) === '<!DOCTYPE') { reject(new Error('No access to the sheet (sign into Google)')); return; }
+          const rows = parseCsv(t);
+          const h = (rows.shift() || []).map((x) => x.trim());
+          const c = (n) => h.indexOf(n);
+          if (c('estado') === -1) { reject(new Error('No ka_audit tab yet: run 📋 Audit first')); return; }
+          const out = rows.map((r) => {
+            const v = (n) => (c(n) === -1 ? '' : (r[c(n)] || '').trim());
+            const estado = v('estado'), sf = v('Salesforce'), doc = v('Doc');
+            const key = Object.keys(FIX_ACTIONS).find((k) => estado.indexOf(k) === 0);
+            let action = key ? FIX_ACTIONS[key] : 'manual';
+            const recordId = (sf.match(/\/(ka[0-9A-Za-z]{13,16})\//) || [])[1] || '';
+            const docId = (doc.match(/\/d\/([A-Za-z0-9_-]{20,})/) || [])[1] || '';
+            if ((action === 'create' || action === 'update') && !recordId) action = 'manual';
+            if (action === 'archive' && !docId) action = 'manual';
+            return { estado, team: v('equipo'), title: v('título'), url: sf, recordId, docId, action };
+          }).filter((x) => x.estado && x.estado !== 'OK');
+          resolve(out);
+        },
+        onerror() { reject(new Error('Network error reading the sheet')); },
+      });
+    });
+  }
+
+  const ACT_LABEL = { create: '+ New', update: '↑ Update', archive: 'Archive Doc', manual: 'By hand' };
+  async function openFixList() {
+    if (_busy) return;
+    if (getAudit() || getBatch()) { setStatus('error', 'Something else is still running in this tab.'); return; }
+    setStatus('loading', 'Reading the last audit…');
+    let items;
+    try { items = await fetchAuditRows(); } catch (e) { setStatus('error', e.message); return; }
+    if (!items.length) { setStatus('success', 'Nothing to fix: the last audit is all OK.'); return; }
+    const body = _overlayBody(); if (!body) return;
+    body.innerHTML =
+      '<div class="kar-title">Fix from audit</div>' +
+      '<div style="font-size:12px;color:#5B5D62">Tick what you accept. Archive is off by default: tick it only when the KA was archived in Salesforce.</div>' +
+      '<div class="kar-fix-list">' + items.map((x, i) => {
+        const can = x.action !== 'manual';
+        return '<label class="' + (can ? '' : 'off') + '"><input type="checkbox" data-i="' + i + '"' +
+          (can ? (x.action === 'archive' ? '' : ' checked') : ' disabled') + '>' +
+          '<span style="flex:1;min-width:0"><span class="kar-act ' + x.action + '">' + ACT_LABEL[x.action] + '</span> ' +
+          escHtml(x.title) + '<br><span style="font-size:11px;color:#8A8D93">' + escHtml(x.team) + ' · ' + escHtml(x.estado) + '</span></span></label>';
+      }).join('') + '</div>' +
+      '<button class="kar-mini-btn blue" id="kar-fix-go">Do selected</button> ' +
+      '<button class="kar-mini-btn warn" id="kar-fix-cancel">Cancel</button>';
+    _showOverlay();
+    const count = () => body.querySelectorAll('.kar-fix-list input:checked').length;
+    const go = document.getElementById('kar-fix-go');
+    const upd = () => { go.textContent = 'Do selected (' + count() + ')'; go.disabled = !count(); };
+    body.querySelectorAll('.kar-fix-list input').forEach((el) => el.addEventListener('change', upd)); upd();
+    document.getElementById('kar-fix-cancel').addEventListener('click', () => setStatus('idle', 'Cancelled.'));
+    go.addEventListener('click', () => {
+      const chosen = Array.from(body.querySelectorAll('.kar-fix-list input:checked')).map((el) => items[+el.dataset.i]);
+      runFixes(chosen);
+    });
+  }
+
+  async function runFixes(chosen) {
+    const reviewer = await ensureReviewer();
+    if (!reviewer) return;
+    if (!(await ensureSecret())) return;
+    const arch = chosen.filter((x) => x.action === 'archive');
+    const syncs = chosen.filter((x) => x.action === 'create' || x.action === 'update');
+    if (!window.confirm('Do ' + chosen.length + ' fix' + (chosen.length > 1 ? 'es' : '') + '?\n\n' +
+      (syncs.filter((x) => x.action === 'create').length ? '• Create ' + syncs.filter((x) => x.action === 'create').length + ' Doc(s)\n' : '') +
+      (syncs.filter((x) => x.action === 'update').length ? '• Update ' + syncs.filter((x) => x.action === 'update').length + ' Doc(s)\n' : '') +
+      (arch.length ? '• Move ' + arch.length + ' Doc(s) to the Archived folder\n' : '') +
+      '\nKeep this tab on Salesforce until it finishes.')) { setStatus('idle', 'Cancelled.'); return; }
+    let archived = 0, archFail = 0;
+    if (arch.length) {
+      setStatus('loading', 'Archiving ' + arch.length + ' Doc(s)…');
+      try {
+        const r = await apiPost({ action: 'archive', docIds: arch.map((x) => x.docId), by: reviewer });
+        archived = (r && r.moved) || 0; archFail = arch.length - archived;
+      } catch (e) { archFail = arch.length; }
+    }
+    if (!syncs.length) { finishBatch({ ok: 0, fail: 0, skip: 0, list: [], source: 'fix', archived, archFail }); return; }
+    const list = syncs.map((x) => ({ url: x.url, title: x.title, recordId: x.recordId, mode: x.action, audience: x.action === 'create' ? x.team : '' }));
+    setBatch({ active: true, list, idx: 0, reviewer, ok: 0, fail: 0, skip: 0, source: 'fix', archived, archFail });
+    location.href = list[0].url;
+  }
+
   function getBatch() { try { return JSON.parse(GM_getValue(K_BATCH, '') || 'null'); } catch (e) { return null; } }
   function setBatch(b) { GM_setValue(K_BATCH, b ? JSON.stringify(b) : ''); }
   function slugOf(u) {
@@ -1154,7 +1262,7 @@
     for (let i = 0; i < 40; i++) {
       const cur = _readKa();
       const isTarget = target.recordId
-        ? location.href.indexOf(target.recordId) !== -1      // record link (outdated list)
+        ? location.href.indexOf(target.recordId) !== -1      // record link (outdated / fix list)
         : slugOf(cur && cur.url) === slugOf(target.url);     // article link (ka_published)
       if (cur && cur.title && isTarget) { ka = cur; break; }
       await sleep(500);
@@ -1165,8 +1273,8 @@
       try {
         const html = normalizeKaHtml(ka.richFields, ka.title);
         const res = await apiPost({
-          action: 'sync', mode: 'update', title: ka.title, kaId: ka.kaId, version: ka.version,
-          lastModified: ka.lastModified, url: ka.url, html, reviewer: b.reviewer, audience: '',
+          action: 'sync', mode: target.mode || 'update', title: ka.title, kaId: ka.kaId, version: ka.version,
+          lastModified: ka.lastModified, url: ka.url, html, reviewer: b.reviewer, audience: target.audience || '',
         });
         if (res && res.ok) b.ok++; else b.fail++;
       } catch (e) { b.fail++; }
@@ -1189,10 +1297,11 @@
     setButtonsDisabled(false);
     const body = _overlayBody();
     if (body) {
-      body.innerHTML = '<div class="kar-title success">\u2713 Batch done</div>' +
-        '<div style="font-size:12px;color:#5B5D62">' + b.ok + ' updated \u00B7 ' + b.fail +
-        ' failed \u00B7 ' + b.skip + ' skipped (of ' + b.list.length + ')</div>' +
-        (b.source === 'outdated' ? '<div style="font-size:12px;color:#5B5D62;margin-top:4px">Run \uD83D\uDCCB Audit again to update the sheet.</div>' : '') +
+      body.innerHTML = '<div class="kar-title success">\u2713 ' + (b.source === 'fix' ? 'Fixes done' : 'Batch done') + '</div>' +
+        (b.list.length ? '<div style="font-size:12px;color:#5B5D62">' + b.ok + ' synced \u00B7 ' + b.fail +
+        ' failed \u00B7 ' + b.skip + ' skipped (of ' + b.list.length + ')</div>' : '') +
+        (b.archived || b.archFail ? '<div style="font-size:12px;color:#5B5D62">' + (b.archived || 0) + ' Doc(s) archived' + (b.archFail ? ' \u00B7 ' + b.archFail + ' failed' : '') + '</div>' : '') +
+        (b.source === 'outdated' || b.source === 'fix' ? '<div style="font-size:12px;color:#5B5D62;margin-top:4px">Run \uD83D\uDCCB Audit again to update the sheet.</div>' : '') +
         _reviewerFooter();
       _showOverlay(); _wireReviewerLink();
     }
