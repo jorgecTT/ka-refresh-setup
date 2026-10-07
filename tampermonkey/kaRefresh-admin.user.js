@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.3.1
+// @version      2.4.0
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -52,6 +52,13 @@
  * v2.2.2 - Audit: long reports (Support, 170+ rows) load in batches; the
  *   reader now waits at the bottom, follows a swapped table and retries.
  *
+ * v2.4.0 - Audit, one report at a time: read it, save it, VERIFY it, then go
+ *   to the next. Verify = the rows match the Docs Drive has for that team
+ *   (at most 10 of the team's Docs missing, at most 5 rows from another
+ *   team) and the row count matches the report total. A report that fails is
+ *   reloaded and read again (3 tries) before the audit stops. Only when all 3
+ *   are verified is anything sent. Frames are also matched by report name.
+ *
  * v2.3.1 - Audit: read ONLY the report being audited. The console keeps the
  *   previous report tab loaded, and the reader could pick up its table (or
  *   its "Total Records") while the next one opened, mixing rows between
@@ -99,7 +106,7 @@
     { team: 'Trust & Safety', reportId: '00OVx000006ORWfMAO', label: 'T&S KAs: Active' },
   ];
 
-  console.log('[KA Refresh] v2.3.1 loaded (admin)');
+  console.log('[KA Refresh] v2.4.0 loaded (admin)');
 
   function walkAll(root, callback, depth) {
     if (depth > 30 || !root) return;
@@ -1335,6 +1342,13 @@
       if ((doc.location && doc.location.href || '').indexOf(id) !== -1) return true;
       const fe = doc.defaultView && doc.defaultView.frameElement;
       if (fe && (fe.getAttribute('src') || '').indexOf(id) !== -1) return true;
+      // Inside a report frame, its own name is shown and no other report's.
+      if (doc !== document && doc.body) {
+        const rep = AUDIT_REPORTS.find(r => r.reportId === reportId);
+        const text = doc.body.innerText || '';
+        if (rep && text.indexOf(rep.label) !== -1 &&
+            !AUDIT_REPORTS.some(o => o !== rep && text.indexOf(o.label) !== -1)) return true;
+      }
     } catch (e) { /* cross-origin */ }
     return false;
   }
@@ -1414,6 +1428,27 @@
     return { ok: true, rows: Array.from(rows.values()), total: total, strict: strict };
   }
 
+  // Check one report's rows against the Docs Drive has for that team.
+  function verifyReport(rep, res, teamDocs) {
+    const total = res.total, rows = res.rows || [];
+    if (total === null || rows.length < total) return { ok: false, why: 'read ' + rows.length + ' of ' + total + ' rows' };
+    const inRows = new Set(rows.map(r => r.urlName).filter(Boolean));
+    const mine = (teamDocs[rep.team] || []);
+    const missing = mine.filter(s => !inRows.has(s)).length;
+    const others = new Set();
+    Object.keys(teamDocs).forEach(t => { if (t !== rep.team) teamDocs[t].forEach(s => others.add(s)); });
+    const mineSet = new Set(mine);
+    const foreign = rows.filter(r => r.urlName && others.has(r.urlName) && !mineSet.has(r.urlName)).length;
+    if (missing > 10) return { ok: false, why: missing + ' ' + rep.team + ' Docs are not in what was read', missing, foreign };
+    if (foreign > 5) return { ok: false, why: foreign + ' rows belong to another team\'s report', missing, foreign };
+    return { ok: true, missing, foreign };
+  }
+
+  function auditChecklist(a) {
+    return a.reports.map((r, i) => (r.verified ? '\u2713 ' : (i === a.idx ? '\u2026 ' : '\u25CB ')) + r.label +
+      (r.verified ? ' \u00B7 ' + r.rows.length + ' of ' + r.total + ' rows, verified' : '')).join('\n');
+  }
+
   // -- Audit flow --
   async function startAudit() {
     if (_busy) return;
@@ -1428,10 +1463,18 @@
     }
     setButtonsDisabled(true);
     setStatus('loading', 'Reading the "Published Articles" list\u2026');
-    let published;
-    try { published = await fetchPublishedArticles(); }
+    let published, teamDocs = {};
+    try {
+      published = await fetchPublishedArticles();
+      setStatus('loading', 'Reading the KA Docs in Drive\u2026');
+      const d = await apiPost({ action: 'auditDocs' });
+      if (!d || !d.ok) throw new Error(d && d.code === 'BAD_ACTION'
+        ? 'the Google Script is older than this script. Paste the new Code.gs and deploy a New version.'
+        : 'could not read the Docs in Drive (' + ((d && d.error) || 'no answer') + ')');
+      (d.docs || []).forEach(x => { if (x.slug) (teamDocs[x.team] = teamDocs[x.team] || []).push(x.slug); });
+    }
     catch (e) { setButtonsDisabled(false); setStatus('error', 'Audit stopped: ' + e.message); return; }
-    setAudit({ active: true, idx: 0, by: reviewer, published: published,
+    setAudit({ active: true, idx: 0, by: reviewer, published: published, teamDocs: teamDocs,
                reports: AUDIT_REPORTS.map(r => ({ team: r.team, reportId: r.reportId, label: r.label })) });
     location.href = reportUrl(AUDIT_REPORTS[0].reportId);
   }
@@ -1452,10 +1495,12 @@
     const rep = a.reports[a.idx];
     if (location.href.indexOf(rep.reportId) === -1) { location.href = reportUrl(rep.reportId); return; }
 
-    setAuditStatus(a, 'Opening report ' + (a.idx + 1) + ' of ' + a.reports.length, rep.label);
+    rep.attempts = rep.attempts || 0;
+    setAuditStatus(a, 'Opening report ' + (a.idx + 1) + ' of ' + a.reports.length + (rep.attempts ? ' (try ' + (rep.attempts + 1) + ' of 3)' : ''), auditChecklist(a));
     let res = null;
-    // Give the new tab a moment, so the previous report's tab is hidden first.
-    await sleep(2000);
+    // Give the new tab a moment, so the previous report's tab is hidden first
+    // (longer on a retry).
+    await sleep(2000 + rep.attempts * 3000);
     for (let i = 0; i < 60; i++) {
       if (!getAudit()) return;                    // stopped
       // First 20 s: only a frame that carries this report's ID counts. After
@@ -1463,22 +1508,33 @@
       const strict = i < 20 || !!findReportTable(rep.reportId, true);
       res = await readReportTable(rep.reportId, strict, (n, total) =>
         setAuditStatus(a, 'Reading report ' + (a.idx + 1) + ' of ' + a.reports.length,
-          rep.label + ': ' + n + (total ? ' of ' + total : '') + ' rows'));
+          auditChecklist(a) + '\n' + rep.label + ': ' + n + (total ? ' of ' + total : '') + ' rows'));
       if (res.ok) break;
       await sleep(1000);
     }
     if (!getAudit()) return;
-    if (!res || !res.ok) { failAudit('could not read "' + rep.label + '" (' + (res ? res.why : 'no answer') + ').'); return; }
-    if (res.total === null || res.rows.length < res.total) {
-      failAudit('"' + rep.label + '" only showed ' + res.rows.length + ' of ' + res.total + ' rows. Try again.');
+    const check = res && res.ok ? verifyReport(rep, res, a.teamDocs || {}) : { ok: false, why: res ? res.why : 'no answer' };
+    console.log('[KA Refresh] audit read', rep.label, 'try', rep.attempts + 1, res && { rows: res.rows && res.rows.length, total: res.total, strict: res.strict }, check);
+    if (!check.ok) {
+      rep.attempts++;
+      if (rep.attempts >= 3) {
+        failAudit('"' + rep.label + '" could not be verified after 3 tries (' + check.why + '). Nothing was written. ' +
+          'Close the other report tabs in Salesforce and run the audit again.');
+        return;
+      }
+      setAudit(a);
+      setAuditStatus(a, '"' + rep.label + '" did not check out (' + check.why + '). Reading it again\u2026', auditChecklist(a));
+      await sleep(1500);
+      location.reload();
       return;
     }
     rep.total = res.total;
     rep.rows = res.rows;
+    rep.verified = true;
     a.idx++;
     setAudit(a);
     if (a.idx < a.reports.length) {
-      setAuditStatus(a, 'Next report\u2026', a.reports[a.idx].label);
+      setAuditStatus(a, 'Saved and verified. Next report\u2026', auditChecklist(a));
       setTimeout(() => { location.href = reportUrl(a.reports[a.idx].reportId); }, 700);
     } else {
       await finishAudit(a);
@@ -1504,7 +1560,8 @@
     let res;
     try {
       res = await apiPost({
-        action: 'audit', by: a.by, published: a.published,
+        action: 'audit', by: a.by, published: a.published, // teamDocs stay local
+
         reports: a.reports.map(r => ({ team: r.team, reportId: r.reportId, total: r.total, rows: r.rows })),
       });
     } catch (e) { failAudit(e.message); return; }
@@ -1526,7 +1583,7 @@
     const pct = Math.round((a.idx / (a.reports.length + 1)) * 100);
     body.innerHTML =
       '<div class="kar-title loading"><span class="kar-spinner"></span>' + escHtml(msg) + '</div>' +
-      (sub ? '<div style="font-size:12px;color:#5B5D62;margin:2px 0 6px">' + escHtml(sub) + '</div>' : '') +
+      (sub ? '<div style="font-size:12px;color:#5B5D62;margin:2px 0 6px;white-space:pre-line">' + escHtml(sub) + '</div>' : '') +
       '<div style="height:6px;background:#E8E9EB;border-radius:100px;overflow:hidden;margin:6px 0">' +
       '<div style="height:100%;width:' + pct + '%;background:#7A5AF8;transition:width .3s"></div></div>' +
       '<button class="kar-mini-btn warn" id="kar-audit-stop">Stop</button>';

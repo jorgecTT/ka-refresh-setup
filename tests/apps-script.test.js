@@ -316,5 +316,16 @@ test('audit refuses a report that came back short (many extra Docs in one team)'
   assert.strictEqual(mails.length, 0, 'no email');
 });
 
+test('auditDocs lists the published KA Docs per team (read-only)', () => {
+  const fx = auditFixture();
+  const { g, sheets } = loadBackend({ files: fx.files, props: { SHARED_SECRET: 's' } });
+  const r = post(g, { secret: 's', action: 'auditDocs' });
+  assert.ok(r.ok, JSON.stringify(r));
+  const by = {}; r.docs.forEach(d => { (by[d.team] = by[d.team] || []).push(d.slug); });
+  assert.deepStrictEqual(by['GTM'].sort(), ['', 'Gone', 'Ok-One', 'Wrong'].sort());   // 'Sales' Doc counts as GTM
+  assert.ok(!by['Trust & Safety'], 'archived Docs are not listed');
+  assert.ok(!sheets.ka_audit, 'nothing written');
+});
+
 module.exports = { loadBackend, post };
 if (require.main === module) console.log('\n' + passed + ' passed');

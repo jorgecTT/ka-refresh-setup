@@ -19,7 +19,7 @@ Compara cada semana los **reportes del Content Index** (GTM, Support y T&S) con 
 
 1. El lunes te llega el correo **"Recordatorio: auditoría semanal de KAs"**.
 2. Abre cualquier KA en Salesforce y dale clic a **📋 Audit**, abajo a la derecha. También está en el menú de Tampermonkey → **Run Content Index audit**.
-3. Deja la pestaña abierta: pasa sola por los 3 reportes (1–2 minutos).
+3. Deja la pestaña abierta: pasa sola por los 3 reportes (2–4 minutos). Cada reporte se lee, se guarda y se verifica contra los Docs de ese equipo en Drive antes de pasar al siguiente. Si no cuadra, la página se recarga y lo lee otra vez (hasta 3 veces). Si no se puede verificar, se detiene sin guardar nada.
 4. Al terminar ves el resumen, te llega el correo y queda actualizada la pestaña `ka_audit`. Cada corrida se agrega también a `ka_audit_log`.
 
 No cambia nada ni en Salesforce ni en Drive: solo lee y escribe en el sheet.
@@ -27,7 +27,7 @@ No cambia nada ni en Salesforce ni en Drive: solo lee y escribe en el sheet.
 ## Piezas
 
 - `apps-script/Code.gs`: el Google Script (v2.3.1). Acción `audit`, pestañas `ka_audit` y `ka_audit_log`, correo y recordatorio semanal (`setupAuditReminderTrigger`).
-- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.3.1) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
+- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.4.0) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
 - `tests/`: pruebas sin conexión (`node tests/apps-script.test.js`) y de punta a punta en Chromium (`node tests/audit-e2e.test.js`).
 
 ## Configuración (Script Properties del Google Script)

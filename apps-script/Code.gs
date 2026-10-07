@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.3.2)
+ * KA Sync v2 — Google Apps Script backend (v2.3.3)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,11 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.3.3 (audit)
+ *   - NEW action 'auditDocs' (read-only): the KA Docs in the Published folder
+ *     per team. The admin script checks each report against it right after
+ *     reading it, and re-reads the report when they don't agree.
  *
  * v2.3.2 (audit)
  *   - Safety stop: when a team suddenly has many "Doc de más" (more than
@@ -103,6 +108,7 @@ function doPost(e) {
       case 'sync':    return _json(handleSync(req, t0));
       case 'archive': return _json(handleArchive(req));
       case 'audit':   return _json(handleAudit(req));
+      case 'auditDocs': return _json(handleAuditDocs());
       default:
         return _json({ ok: false, error: 'Unknown action: ' + action, code: 'BAD_ACTION' });
     }
@@ -751,6 +757,14 @@ function _validateAuditRequest(req) {
     if (!teams[AUDIT_REPORTS[j].team]) return 'Missing report: ' + AUDIT_REPORTS[j].team;
   }
   return '';
+}
+
+// Read-only: which KA (URL Name) each published Doc belongs to, per team.
+function handleAuditDocs() {
+  var docs = _auditDocs(KA_FOLDER_ID).map(function (d) {
+    return { team: TEAM_ALIASES[d.team] || d.team, slug: d.slug, kaId: d.kaId };
+  });
+  return { ok: true, docs: docs };
 }
 
 // A normal week has a handful of extra Docs per team. Dozens in one team means

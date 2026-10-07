@@ -38,8 +38,8 @@ files.extra = { folder: PUB, title: 'Retired - internal - GTM - EN', description
 // are drawn at a time, rows arrive in batches of 100 (the next batch takes
 // 2.5 s after you reach the bottom) and the <table> element is replaced on
 // every redraw.
-function reportFrame(team) {
-  const rows = kas.filter(k => k.team === team);
+function reportFrame(team, short) {
+  const rows = kas.filter(k => k.team === team).slice(0, short || undefined);
   return `<html><body style="margin:0"><div>Total Records ${rows.length}</div>
   <div id="sc" style="height:500px;overflow:auto"><div id="sp" style="position:relative"></div></div>
   <script>
@@ -72,9 +72,16 @@ function reportFrame(team) {
     return JSON.stringify(post(backend.g, JSON.parse(body)));
   });
 
+  const frameLoads = {};
   await page.route(SF + '/**', r => {
     const u = new URL(r.request().url());
-    if (u.pathname.startsWith('/frame/')) return r.fulfill({ contentType: 'text/html', body: reportFrame(REPORTS[u.pathname.split('/')[2]]) });
+    if (u.pathname.startsWith('/frame/')) {
+      // The first time the Support report opens it comes back short (60 rows,
+      // "Total Records 60"), like a bad read: the script must catch it and re-read.
+      const team = REPORTS[u.pathname.split('/')[2]];
+      frameLoads[team] = (frameLoads[team] || 0) + 1;
+      return r.fulfill({ contentType: 'text/html', body: reportFrame(team, team === 'Support Ops' && frameLoads[team] === 1 ? 60 : 0) });
+    }
     const rep = u.pathname.match(/\/lightning\/r\/Report\/([^/]+)\//);
     if (rep) {
       // Like the Salesforce console: the PREVIOUS report's tab is still loaded
@@ -133,6 +140,8 @@ function reportFrame(team) {
   const audit = backendCalls.find(c => c.action === 'audit');
   assert.ok(audit, 'audit call sent');
   assert.strictEqual(audit.secret, 'the-key');
+  assert.ok(backendCalls.some(c => c.action === 'auditDocs'), 'Drive Docs read first');
+  assert.ok(frameLoads['Support Ops'] >= 2, 'the short Support read was retried');
   assert.deepStrictEqual(audit.reports.map(r => [r.team, r.rows.length, r.total]),
     [['GTM', 19, 19], ['Support Ops', 171, 171], ['Trust & Safety', 62, 62]]);
   assert.strictEqual(audit.published.length, 252);
