@@ -243,7 +243,7 @@ test('URL Names that differ only in case are different KAs', () => {
   assert.strictEqual(tab['Background Checks (Pro)'], 'OK');
 });
 
-test('outdated: same version in the Doc header is not outdated; 10-minute tolerance', () => {
+test('outdated: edited after the last sync is outdated even with the same version (minor edit); 10-minute tolerance', () => {
   const published = [
     { id: 'kaS', articleNumber: '000201', title: 'Same version', urlName: 'Same', version: 7, lastModified: '2026-09-20T10:00:00.000Z' },
     { id: 'kaN', articleNumber: '000202', title: 'New version',  urlName: 'New',  version: 8, lastModified: '2026-09-20T10:00:00.000Z' },
@@ -265,8 +265,8 @@ test('outdated: same version in the Doc header is not outdated; 10-minute tolera
   const r = post(g, { secret: 's', action: 'audit', reports, published, by: 'J' });
   assert.ok(r.ok, JSON.stringify(r));
   const tab = Object.fromEntries(sheets.ka_audit.data().slice(1).map(x => [x[2], x]));
-  assert.strictEqual(tab['Same version'][0], 'OK');
-  assert.ok(/Misma versión \(v7\)/.test(tab['Same version'][8]), tab['Same version'][8]);
+  assert.strictEqual(tab['Same version'][0], 'Desactualizado', 'minor edit published without a new version');
+  assert.ok(/misma versión v7, cambio menor/.test(tab['Same version'][8]), tab['Same version'][8]);
   assert.strictEqual(tab['New version'][0], 'Desactualizado');
   assert.ok(/Doc en v6, Salesforce en v8/.test(tab['New version'][8]));
   assert.strictEqual(tab['Minutes'][0], 'OK', '5 minutes is inside the tolerance');

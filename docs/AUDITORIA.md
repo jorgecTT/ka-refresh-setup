@@ -9,7 +9,7 @@ Compara cada semana los **reportes del Content Index** (GTM, Support y T&S) con 
 | En Salesforce sin Doc | Está en un reporte, pero no tiene Doc en la carpeta de publicados | Abrir el KA y darle **+ New** |
 | Archivado por error | Su Doc está en la carpeta de archivados, pero el KA sigue en el reporte | Regresar el Doc a publicados |
 | Docs duplicados | Hay más de un Doc para el mismo KA | Borrar los sobrantes |
-| Desactualizado | El KA tiene una versión más nueva en Salesforce que la del Doc (si la versión es la misma, sale OK) | **⟳ Refresh outdated** o **↑ Update** en el KA |
+| Desactualizado | El KA se editó en Salesforce después del último sync del Doc. Incluye los cambios menores publicados sin "nueva versión" (el número de versión no cambia) | **⟳ Refresh outdated** o **↑ Update** en el KA |
 | Equipo distinto | El nombre del Doc dice un equipo y el reporte otro | Revisar con el equipo |
 | Doc de más | Tiene Doc, pero el KA ya no está en ningún reporte | Revisar si hay que archivarlo |
 | Doc sin datos del KA | El Doc no tiene guardado su número de KA ni su URL Name | Darle **↑ Update** a su KA |

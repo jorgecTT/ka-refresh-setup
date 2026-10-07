@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.3.3)
+ * KA Sync v2 — Google Apps Script backend (v2.3.4)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,12 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.3.4 (audit)
+ *   - A KA edited in Salesforce after its last sync is "Desactualizado" even
+ *     when the version number is the same: minor edits published without
+ *     "new version" keep the number but change the content. (Undoes the
+ *     same-version exemption from 2.3.1.)
  *
  * v2.3.3 (audit)
  *   - NEW action 'auditDocs' (read-only): the KA Docs in the Published folder
@@ -685,16 +691,16 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
         var found = [];
         var sfMs = ka.lastModified ? Date.parse(ka.lastModified) : 0;
         if (sfMs && doc.modifiedMs && sfMs - doc.modifiedMs > OUTDATED_TOLERANCE_MS) {
-          // Same version in the Doc header and in Salesforce = same content.
+          // Salesforce changed after the last sync. The version number alone
+          // can't tell us the content is the same: a minor edit published
+          // without "new version" keeps the number. So it is outdated either way.
           var docV = opts.docVersion ? String(opts.docVersion(doc.docId) || '') : '';
           var sfV = info.version != null ? String(info.version) : '';
-          if (docV && sfV && docV === sfV) {
-            notes.push('Misma versión (v' + sfV + '): en Salesforce solo cambió la fecha');
-          } else {
-            found.push('OUTDATED');
-            notes.push(docV && sfV ? 'Doc en v' + docV + ', Salesforce en v' + sfV
-                                   : 'Cambió en Salesforce después del último sync');
-          }
+          found.push('OUTDATED');
+          notes.push(docV && sfV && docV === sfV
+            ? 'Se editó en Salesforce después del último sync (misma versión v' + sfV + ', cambio menor)'
+            : docV && sfV ? 'Doc en v' + docV + ', Salesforce en v' + sfV
+                          : 'Cambió en Salesforce después del último sync');
         }
         if (doc.team && doc.team !== team) {
           found.push('WRONG_TEAM');
