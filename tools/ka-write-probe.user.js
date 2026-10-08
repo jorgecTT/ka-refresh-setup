@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.4.0
+// @version      0.4.1
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -192,7 +192,16 @@
     ['Table', 'table'], ['Table header', 'th'], ['Merged cells', '[colspan]'], ['Quote', 'blockquote'], ['Line', 'hr'],
     ['Image from a link', 'img[src^="http"]'], ['Image inside the page', 'img[src^="data:"]'],
   ];
+  // Salesforce can hand the field back with its tags written as text (&lt;h1&gt;).
+  function asHtml(html) {
+    html = html || '';
+    if (!/<[a-z]/i.test(html) && /&lt;[a-z]/i.test(html)) {
+      const t = document.createElement('textarea'); t.innerHTML = html; html = t.value;
+    }
+    return html;
+  }
   function featuresOf(html) {
+    html = asHtml(html);
     const d = new DOMParser().parseFromString('<body>' + (html || '') + '</body>', 'text/html');
     const has = {};
     CHECKS.forEach(([name, sel]) => { try { has[name] = d.querySelectorAll(sel).length; } catch (e) { has[name] = 0; } });
@@ -241,8 +250,9 @@
       const sent = featuresOf(SAMPLES[label] || ''), kept = featuresOf(html);
       const lost = Object.keys(sent).filter(k => sent[k] > 0 && !(kept[k] > 0));
       const ok = Object.keys(sent).filter(k => sent[k] > 0 && kept[k] > 0);
+      const start = html.slice(0, 90).replace(/\s+/g, ' ');
       add(!lost.length, 'Saved: ' + label, (ok.length ? 'kept: ' + ok.join(', ') : '') + (lost.length ? (ok.length ? ' | ' : '') + 'LOST: ' + lost.join(', ') : '') +
-        ' (' + html.length + ' chars)');
+        ' (' + html.length + ' chars' + (asHtml(html) !== html ? ', tags came back as text' : '') + ') starts: ' + start);
     });
     return any;
   }
@@ -302,12 +312,12 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.4.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.4.1' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       (finished ? '<div style="margin-top:10px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '');
     if (finished) {
-      const text = 'KA Write Probe 0.4.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.4.1 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
