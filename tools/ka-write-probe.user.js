@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.6.0
+// @version      0.6.1
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -482,7 +482,20 @@
   }
   // A plain input (text/url) in the edit form, found by its label.
   function inputByLabel(re) {
-    return deepAll(document, 'input, textarea').filter(shown).find(el => re.test((labelOf(el) || '').replace(/[*\s]+$/g, '').replace(/^\*\s*/, '')));
+    const clean = t => (t || '').replace(/\s+/g, ' ').replace(/^\*\s*/, '').trim();
+    // 1. a label whose own text is the field name, then the closest box after it
+    const labels = deepAll(document, 'label, .slds-form-element__label, span, div').filter(el =>
+      el.children.length <= 2 && re.test(clean(el.innerText).replace(/\s*\(.*\)$/, '')) && shown(el));
+    for (const lab of labels) {
+      let cur = lab;
+      for (let i = 0; i < 6 && cur; i++) {
+        const box = deepAll(cur, 'textarea, input[type="text"], input[type="url"], input:not([type])').filter(shown)[0];
+        if (box) return box;
+        cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host);
+      }
+    }
+    // 2. fallback: the box's own label
+    return deepAll(document, 'input, textarea').filter(shown).find(el => re.test(clean(labelOf(el))));
   }
   function typeInto(el, text) {
     el.focus();
@@ -501,20 +514,26 @@
   async function fillFigma(add, id, fields) {
     const ff = figmaFields(fields);
     add(!!ff.multi, 'Figma: Multimedia field', describeField(fields, ff.multi));
-    add(!!ff.media, 'Figma: Media field', describeField(fields, ff.media));
+    if (ff.media) add(true, 'Figma: Media field', describeField(fields, ff.media));
     // 1. Multimedia = the Figma embed link
-    const mInput = inputByLabel(FIGMA_LABELS.multi);
+    const mInput = inputByLabel(/^multimedia\b/i);
     if (mInput) add(typeInto(mInput, FIGMA_EMBED), 'Figma: put the embed link in Multimedia', FIGMA_EMBED.slice(0, 70) + '\u2026');
     else add(false, 'Figma: Multimedia box', 'Not found in the edit form. Paste this into Multimedia by hand: ' + FIGMA_EMBED);
     // 2. Media = the KnowledgeIFrame iframe with THIS draft's id
     const code = kiframe(id);
-    const mediaFrame = uniqueFrames().find(e => FIGMA_LABELS.media.test(e.label || ''));
+    const frames = uniqueFrames();
+    const mediaFrame = frames.find(e => FIGMA_LABELS.media.test(e.label || '')) || frames.find(e => /KB.?Content/i.test(e.label || ''));
     const mediaInput = mediaFrame ? null : inputByLabel(FIGMA_LABELS.media);
     if (mediaFrame) {
       const doc = mediaFrame.frame.contentDocument;
-      mediaFrame.el.focus(); doc.execCommand('selectAll', false, null); doc.execCommand('insertHTML', false, code);
+      // Insert at the very top of the box (keep what is already there).
+      mediaFrame.el.focus();
+      const sel = doc.defaultView.getSelection(), range = doc.createRange();
+      range.setStart(mediaFrame.el, 0); range.collapse(true); sel.removeAllRanges(); sel.addRange(range);
+      doc.execCommand('insertHTML', false, '<h2>Figma via KnowledgeIFrame</h2>' + code);
       await sleep(400);
-      add(!!mediaFrame.el.querySelector('iframe[src*="KnowledgeIFrame"]'), 'Figma: put the iframe in Media', 'rich text box \u00B7 id ' + id);
+      add(!!mediaFrame.el.querySelector('iframe[src*="KnowledgeIFrame"]'), 'Figma: put the iframe at the top of ' + (mediaFrame.label || 'the content box'),
+        'id ' + id + '. If it is not there, use the editor: Insert > Media > Embed, and paste: ' + code);
     } else if (mediaInput) {
       add(typeInto(mediaInput, code), 'Figma: put the iframe in Media', 'text box \u00B7 id ' + id);
     } else {
@@ -526,7 +545,8 @@
   function checkFigma(add, rec, fields, id) {
     const ff = figmaFields(fields);
     const m = ff.multi ? String(val(rec.json, ff.multi) || '') : '';
-    const media = ff.media ? asHtml(String(val(rec.json, ff.media) || '')) : '';
+    const media = [ff.media].concat(Object.keys(fields).filter(k => fields[k].htmlFormatted)).filter(Boolean)
+      .map(k => asHtml(String(val(rec.json, k) || ''))).find(h => h.indexOf('KnowledgeIFrame') !== -1) || '';
     if (m.indexOf('embed.figma.com') === -1 && media.indexOf('KnowledgeIFrame') === -1) return false;
     add(m.indexOf('embed.figma.com') !== -1, 'Saved: Multimedia', m ? m.slice(0, 90) : 'empty');
     const idOk = media.indexOf('id=' + id) !== -1;
@@ -597,13 +617,13 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.6.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.6.1' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       '';
     if (finished) {
-      const text = 'KA Write Probe 0.6.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.6.1 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
