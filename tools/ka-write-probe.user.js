@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.8.0
+// @version      0.8.1
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -14,6 +14,7 @@
 // ==/UserScript==
 
 /*
+ * 0.8.1: a menu in the box replaces the OK/Cancel pop-ups.
  * 0.8.0: DEMO. "Build the demo article" fills this test draft with a realistic
  *   KA (from tools/demo/build_demo.py). "Update from Doc" reads a Google Doc
  *   (a copy of the article with red strikethrough = delete, green = add),
@@ -955,21 +956,45 @@
     }
     const formOpen = editors().length > 0;
     if (!formOpen) {
-      if (checkImage(add, rec, fields, rich)) return done(id, lines);
-      if (checkFigma(add, rec, fields, id)) return done(id, lines);
-      if (checkStress(add, rec, fields, rich)) return done(id, lines);
-      if (checkSaved(add, rec, fields, rich)) return done(id, lines);
+      const editHint = () => add(false, 'Menu', 'To see the menu (Update from Doc, Build the demo article...), click Edit (pencil) on this draft, wait for the content boxes to load, then click Test write again.');
+      if (checkImage(add, rec, fields, rich) || checkFigma(add, rec, fields, id) || checkStress(add, rec, fields, rich) || checkSaved(add, rec, fields, rich)) { editHint(); return done(id, lines); }
       await formTest(add);   // explains how to open the form
       return done(id, lines);
     }
-    if (window.confirm('Edit form found.\n\nOK = UPDATE FROM DOC: apply the red/green changes of a Google Doc to this draft (checks the 100% match first, never saves).\nCancel = other options.')) await updateFromDoc(add);
-    else if (window.confirm('OK = BUILD THE DEMO ARTICLE (replaces all 5 boxes of this test draft with a realistic demo KA).\nCancel = tests.')) await seedDemo(add, id);
-    else if (window.confirm('OK = IMAGE TEST: paste a test picture into KB Content like a writer would (and drag-and-drop if paste does not work), to see if Salesforce uploads it.\nCancel = other tests.')) await fillImage(add);
-    else if (window.confirm('OK = FIGMA TEST: put the Pro App Simulator in this draft the way Nichole documented it (embed link in Multimedia, KnowledgeIFrame iframe in Media).\nCancel = other tests.')) await fillFigma(add, id, fields);
-    else if (window.confirm('OK = STRESS TEST: fill all 5 boxes close to their limit with the real GTM KAs from Salesforce plus a hard block (big tables, deep lists, nested dropdowns, code, scripts, animations, video...).\nCancel = smaller tests.')) await fillStress(add, fields, rich);
-    else if (window.confirm('OK = fill all boxes with the small sample draft.\nCancel = just type one test line.')) await fillSample(add);
-    else await formTest(add);
+    const pick = await chooseMode(id, lines);
+    if (pick === 'doc') await updateFromDoc(add);
+    else if (pick === 'demo') await seedDemo(add, id);
+    else if (pick === 'image') await fillImage(add);
+    else if (pick === 'figma') await fillFigma(add, id, fields);
+    else if (pick === 'stress') await fillStress(add, fields, rich);
+    else if (pick === 'sample') await fillSample(add);
+    else if (pick === 'line') await formTest(add);
+    else { add(true, 'Closed', 'Nothing was changed.'); }
     done(id, lines);
+  }
+
+  // 0.8.1: a clear menu in the box instead of a chain of OK/Cancel pop-ups.
+  const MODES = [
+    ['doc', '1. Update from Doc', 'Apply the red/green changes of a Google Doc (checks 100% match first, never saves).'],
+    ['demo', '2. Build the demo article', 'Replaces all 5 boxes of this test draft with the demo KA.'],
+    ['image', 'Image test', ''], ['figma', 'Figma test', ''], ['stress', 'Stress test', ''],
+    ['sample', 'Small sample', ''], ['line', 'One test line', ''],
+  ];
+  function chooseMode(id, lines) {
+    return new Promise(resolve => {
+      render(id, lines, false);
+      const box = document.getElementById('kwp-box');
+      const wrap = document.createElement('div');
+      wrap.innerHTML = '<div style="font-weight:700;margin:6px 0">Edit form found. What do you want to do?</div>' +
+        MODES.map(m => '<div style="margin:6px 0"><button class="kwp-b' + (m[2] ? '' : ' kwp-grey') + '" data-m="' + m[0] + '">' + esc(m[1]) + '</button>' +
+          (m[2] ? '<div style="font-size:12px;color:#5B5D62">' + esc(m[2]) + '</div>' : '') + '</div>').join('') +
+        '<div style="margin-top:8px"><button class="kwp-b kwp-grey" data-m="close">Close</button></div>';
+      box.appendChild(wrap);
+      wrap.querySelectorAll('button').forEach(b => b.onclick = () => {
+        const m = b.getAttribute('data-m');
+        wrap.remove(); render(id, lines, true); resolve(m);
+      });
+    });
   }
 
   function done(id, lines) { render(id, lines, false, true); }
@@ -994,13 +1019,13 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.8.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.8.1' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       '';
     if (finished) {
-      const text = 'KA Write Probe 0.8.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.8.1 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }

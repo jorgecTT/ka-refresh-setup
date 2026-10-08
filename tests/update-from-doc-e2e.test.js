@@ -21,15 +21,15 @@ const frame=(k,l,html)=>`<div><label>${l}</label><iframe data-k="${k}" style="wi
   return r.fulfill({contentType:'text/html',body:'<html><head><meta charset=utf-8></head><body>'+form+'</body></html>'}); });
  await p.addInitScript({content:`window.GM_xmlhttpRequest=o=>{window.__gm(o.url,o.responseType).then(r=>{ if(r.b){ const bin=atob(r.b); const u=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i); o.onload({status:200,response:new Blob([u],{type:'image/png'})}); } else o.onload({status:200,responseText:r.t}); })};window.GM_addStyle=c=>{const s=document.createElement('style');s.textContent=c;document.documentElement.appendChild(s)};window.GM_registerMenuCommand=()=>{};document.addEventListener('DOMContentLoaded',()=>{(0,eval)(${JSON.stringify(script)})});`});
  // 1. build the demo
- answers=[false,true,true];
+ answers=[true];
  await p.goto(SF+'/lightning/r/Knowledge__kav/'+TEST+'/view'); await p.waitForTimeout(900);
- await p.click('#kwp-btn'); await p.waitForSelector('#kwp-copy',{timeout:30000});
+ await p.click('#kwp-btn'); await p.click('button[data-m=demo]',{timeout:15000}); await p.waitForSelector('#kwp-copy',{timeout:30000});
  console.log('SEED:', (await p.$eval('#kwp-box',x=>x.innerText)).replace(/\n+/g,' / '));
  console.log('title=',await p.$eval('#title',e=>e.value),'| mm=',(await p.$eval('#mm',e=>e.value)).slice(0,40));
  kbHtml=await p.$eval('iframe[data-k=KB]',f=>f.contentDocument.body.innerHTML.replace(/<script[\s\S]*?<\/script>/g,''));
  // 2. "save", reopen edit, update from doc
- answers=[true,'https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/edit'];
- await p.reload(); await p.waitForTimeout(900); await p.click('#kwp-btn'); await p.waitForSelector('#kwp-copy',{timeout:30000});
+ answers=['https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz012345/edit'];
+ await p.reload(); await p.waitForTimeout(900); await p.click('#kwp-btn'); await p.click('button[data-m=doc]',{timeout:15000}); await p.waitForSelector('#kwp-copy',{timeout:30000});
  console.log('UPDATE:', (await p.$eval('#kwp-box',x=>x.innerText)).replace(/\n+/g,' / '));
  const after=await p.$eval('iframe[data-k=KB]',f=>f.contentDocument.body.innerHTML.replace(/<script[\s\S]*?<\/script>/g,''));
 
