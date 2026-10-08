@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.5.1
+// @version      0.5.2
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -13,6 +13,8 @@
 // ==/UserScript==
 
 /*
+ * 0.5.2: the hard block starts with the Pro App Simulator Figma prototype
+ *   (already linked from a published KA) as an embed and as a button link.
  * 0.5.0: STRESS test. Reads the GTM KAs of the last audit straight from
  *   Salesforce and fills all 5 boxes to ~90% of their limit with them, plus a
  *   hard block (big and nested tables, 6-level lists, nested dropdowns, code,
@@ -306,6 +308,12 @@
   }
 
   // The hard block: everything a KA could carry, and things Salesforce probably blocks.
+  const FIGMA_PROTO = 'https://www.figma.com/proto/wJzer6HhDQ8a2tJ0tOAPNE/Thumbtack-Pro-App---Simulator?page-id=0:1&node-id=11-2&starting-point-node-id=1:3';
+  const figmaBlock = () => '<h2>Figma prototype (Pro App Simulator)</h2>' +
+    '<p><iframe style="border:1px solid rgba(0,0,0,0.1)" width="800" height="450" allowfullscreen ' +
+      'src="https://www.figma.com/embed?embed_host=share&amp;url=' + encodeURIComponent(FIGMA_PROTO) + '"></iframe></p>' +
+    '<p><a href="' + FIGMA_PROTO.replace(/&/g, '&amp;') + '" target="_blank" rel="noopener" style="display:inline-block;background-color:#009fd9;color:#ffffff;padding:6px 12px;border-radius:4px;text-decoration:none">' +
+      '\u25B6 Open the prototype in Figma</a></p>';
   function hardBlock(p) {
     const rows = [];
     for (let r = 1; r <= 25; r++) {
@@ -317,7 +325,7 @@
     let nestedOl = 'Step 6';
     for (let i = 5; i >= 1; i--) nestedOl = 'Step ' + i + '<ol><li>' + nestedOl + '</li></ol>';
     return '' +
-      '<h1 id="' + p + '-hard">' + STRESS_TAG + ': hard block (' + p + ')</h1>' +
+      '<h1 id="' + p + '-hard">' + STRESS_TAG + ': hard block (' + p + ')</h1>' + figmaBlock() +
       '<p style="font-family:Georgia,serif;font-size:14pt">Georgia 14pt. <span style="font-family:Courier New,monospace">Courier.</span> ' +
         '<span style="color:#ffffff;background-color:#2f3033">White on dark.</span> <sup>superscript</sup> H<sub>2</sub>O E=mc<sup>2</sup> ' +
         '\u00E1\u00E9\u00ED\u00F3\u00FA \u00F1 \u00E7\u00E3\u00F5 \u00BF\u00A1 \u20AC \u00A9 \u2122 \uD83D\uDC4D \uD83D\uDE80 \u2705</p>' +
@@ -424,7 +432,7 @@
     ['mailto link', 'a[href^="mailto:"]'], ['tel link', 'a[href^="tel:"]'], ['New tab link', 'a[target="_blank"]'],
     ['Image from a link', 'img[src^="http"]'], ['Salesforce images (from GTM KAs)', 'img[src*="rtaImage"], img[src*="force.com"], img[src*="salesforce"]'],
     ['CSS animation', 'style, [style*="animation"]'], ['Marquee', 'marquee'], ['Script', 'script'], ['SVG', 'svg'],
-    ['Video', 'video'], ['YouTube iframe', 'iframe'], ['Button / checkbox', 'button, input'], ['onclick', '[onclick]'],
+    ['Video', 'video'], ['YouTube iframe', 'iframe[src*="youtube"]'], ['Figma prototype iframe', 'iframe[src*="figma.com"]'], ['Figma button link', 'a[href*="figma.com/proto"]'], ['Button / checkbox', 'button, input'], ['onclick', '[onclick]'],
   ];
   function featuresOfStress(html) {
     const d = new DOMParser().parseFromString('<body>' + asHtml(html) + '</body>', 'text/html');
@@ -511,13 +519,13 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.5.1' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.5.2' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       '';
     if (finished) {
-      const text = 'KA Write Probe 0.5.1 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.5.2 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
