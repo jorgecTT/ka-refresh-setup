@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.5.0
+// @version      0.5.1
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -320,7 +320,7 @@
       '<h1 id="' + p + '-hard">' + STRESS_TAG + ': hard block (' + p + ')</h1>' +
       '<p style="font-family:Georgia,serif;font-size:14pt">Georgia 14pt. <span style="font-family:Courier New,monospace">Courier.</span> ' +
         '<span style="color:#ffffff;background-color:#2f3033">White on dark.</span> <sup>superscript</sup> H<sub>2</sub>O E=mc<sup>2</sup> ' +
-        '\u00E1\u00E9\u00ED\u00F3\u00FA \u00F1 \u00E7\u00E3\u00F5 \u00BF\u00A1 \u20AC \u00A9 \u2122 \u1F44D \u1F680 \u2705</p>' +
+        '\u00E1\u00E9\u00ED\u00F3\u00FA \u00F1 \u00E7\u00E3\u00F5 \u00BF\u00A1 \u20AC \u00A9 \u2122 \uD83D\uDC4D \uD83D\uDE80 \u2705</p>' +
       '<p><a href="mailto:support@thumbtack.com">mailto link</a> \u00B7 <a href="tel:+18005550100">tel link</a> \u00B7 ' +
         '<a href="https://www.thumbtack.com/" target="_blank" rel="noopener">new tab link</a> \u00B7 <a href="#' + p + '-big">jump to the big table</a></p>' +
       '<h2 id="' + p + '-big">Big table (25 x 8, striped)</h2>' +
@@ -431,7 +431,7 @@
     const has = {};
     STRESS_CHECKS.forEach(([n, sel]) => { try { has[n] = d.querySelectorAll(sel).length; } catch (e) { has[n] = 0; } });
     has.__kas = (asHtml(html).match(/>GTM KA \d+:/g) || []).length;
-    has.__emoji = /\u1F680/.test(asHtml(html)) ? 1 : 0;
+    has.__emoji = /\uD83D\uDE80/.test(asHtml(html)) && /\uD83D\uDC4D/.test(asHtml(html)) ? 1 : 0;
     has.__accents = /\u00F1/.test(asHtml(html)) ? 1 : 0;
     return has;
   }
@@ -498,7 +498,8 @@
       border-radius: 100px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.18); }
     #kwp-box { position: fixed; top: 156px; left: 20px; z-index: 2147483647; width: 380px;
       background: #fff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,.16);
-      padding: 14px 16px; font: 13px/1.5 -apple-system, sans-serif; color: #2F3033; }
+      padding: 14px 16px; font: 13px/1.5 -apple-system, sans-serif; color: #2F3033;
+      max-height: calc(100vh - 176px); overflow-y: auto; }
     #kwp-box .ok { color: #1E8E3E; } #kwp-box .no { color: #C5221F; }
     .kwp-b { padding: 6px 12px; font-size: 12px; font-weight: 600; border: none; border-radius: 100px;
       background: #0E7490; color: #fff; cursor: pointer; margin-right: 6px; }
@@ -510,12 +511,13 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.5.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.5.1' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+      (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
-      (finished ? '<div style="margin-top:10px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '');
+      '';
     if (finished) {
-      const text = 'KA Write Probe 0.5.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.5.1 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
