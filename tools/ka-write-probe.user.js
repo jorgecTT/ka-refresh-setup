@@ -1,16 +1,24 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.4.1
+// @version      0.5.0
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      docs.google.com
 // @run-at       document-idle
 // ==/UserScript==
 
 /*
+ * 0.5.0: STRESS test. Reads the GTM KAs of the last audit straight from
+ *   Salesforce and fills all 5 boxes to ~90% of their limit with them, plus a
+ *   hard block (big and nested tables, 6-level lists, nested dropdowns, code,
+ *   emoji, mailto/tel, and things Salesforce probably blocks: script, CSS
+ *   animation, marquee, SVG, video, iframe, buttons). After Save, run it on
+ *   the article to see sizes, how many KAs came through and what was blocked.
  * 0.4.0: with the edit form open it can fill ALL content boxes with a full
  *   sample draft (TOC, anchors, H1-H3, colors, lists, tables, dropdowns,
  *   images). After you Save, run it again on the article to see which
@@ -257,6 +265,194 @@
     return any;
   }
 
+  // --- 0.5.0: STRESS test. Real GTM KAs from Salesforce + a hard block, every box filled near its limit ---
+  const STRESS_TAG = 'KA stress test';
+  const SHEET_ID = '16X-I4oT-W96XTwx1qs7ErqTAT6sJI7du3_vnYFp9MIo';
+  const FILL = 0.9;   // leave room: the editor adds a little when it saves
+  const LIMIT_FALLBACK = 131072;
+  const SENT_KEY = 'kwp_stress_sent';
+
+  function parseCsv(text) {
+    const rows = []; let row = [], field = '', q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) { if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; } else field += c; }
+      else if (c === '"') q = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else if (c !== '\r') field += c;
+    }
+    if (field.length || row.length) { row.push(field); rows.push(row); }
+    return rows;
+  }
+  // GTM KAs (record ids) from the last audit (ka_audit tab).
+  function gtmFromAudit() {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'GET', url: 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/gviz/tq?tqx=out:csv&sheet=ka_audit',
+        onload(resp) {
+          const t = resp.responseText || '';
+          if (t.slice(0, 9) === '<!DOCTYPE') { reject(new Error('No access to the corpus sheet (sign into Google)')); return; }
+          const rows = parseCsv(t), h = (rows.shift() || []).map(x => x.trim());
+          const c = n => h.indexOf(n);
+          resolve(rows.filter(r => (r[c('equipo')] || '').trim() === 'GTM').map(r => ({
+            title: (r[c('t\u00EDtulo')] || '').trim(),
+            id: (((r[c('Salesforce')] || '').match(/\/(ka[0-9A-Za-z]{13,16})\//)) || [])[1] || '',
+          })).filter(x => x.id));
+        },
+        onerror() { reject(new Error('Network error reading the corpus sheet')); },
+      });
+    });
+  }
+
+  // The hard block: everything a KA could carry, and things Salesforce probably blocks.
+  function hardBlock(p) {
+    const rows = [];
+    for (let r = 1; r <= 25; r++) {
+      rows.push('<tr>' + [1, 2, 3, 4, 5, 6, 7, 8].map(c => '<td style="border:1px solid #ccc;padding:2px 4px' +
+        (r % 2 ? ';background-color:#f5f7f9' : '') + '">R' + r + 'C' + c + (c === 8 ? ' $' + (r * 12.5).toFixed(2) : '') + '</td>').join('') + '</tr>');
+    }
+    let nested = 'Level 6';
+    for (let i = 5; i >= 1; i--) nested = 'Level ' + i + '<ul><li>' + nested + '</li></ul>';
+    let nestedOl = 'Step 6';
+    for (let i = 5; i >= 1; i--) nestedOl = 'Step ' + i + '<ol><li>' + nestedOl + '</li></ol>';
+    return '' +
+      '<h1 id="' + p + '-hard">' + STRESS_TAG + ': hard block (' + p + ')</h1>' +
+      '<p style="font-family:Georgia,serif;font-size:14pt">Georgia 14pt. <span style="font-family:Courier New,monospace">Courier.</span> ' +
+        '<span style="color:#ffffff;background-color:#2f3033">White on dark.</span> <sup>superscript</sup> H<sub>2</sub>O E=mc<sup>2</sup> ' +
+        '\u00E1\u00E9\u00ED\u00F3\u00FA \u00F1 \u00E7\u00E3\u00F5 \u00BF\u00A1 \u20AC \u00A9 \u2122 \u1F44D \u1F680 \u2705</p>' +
+      '<p><a href="mailto:support@thumbtack.com">mailto link</a> \u00B7 <a href="tel:+18005550100">tel link</a> \u00B7 ' +
+        '<a href="https://www.thumbtack.com/" target="_blank" rel="noopener">new tab link</a> \u00B7 <a href="#' + p + '-big">jump to the big table</a></p>' +
+      '<h2 id="' + p + '-big">Big table (25 x 8, striped)</h2>' +
+      '<table style="border-collapse:collapse;width:100%"><thead><tr>' + [1, 2, 3, 4, 5, 6, 7, 8].map(c => '<th style="background-color:#009fd9;color:#fff">Col ' + c + '</th>').join('') +
+        '</tr></thead><tbody>' + rows.join('') + '</tbody></table>' +
+      '<h2>Table inside a table</h2><table border="1"><tr><td>Outer A</td><td><table border="1"><tr><th>Inner 1</th><th>Inner 2</th></tr>' +
+        '<tr><td rowspan="2">rowspan</td><td>x</td></tr><tr><td>y</td></tr></table></td></tr></table>' +
+      '<h2>Lists 6 levels deep</h2><ul><li>' + nested + '</li></ul><ol><li>' + nestedOl + '</li></ol>' +
+      '<ol style="list-style-type:upper-roman"><li>Roman I</li><li>Roman II</li></ol><ul style="list-style-type:square"><li>Square bullet</li></ul>' +
+      '<h2>Dropdowns inside dropdowns</h2><details><summary>Level 1</summary><p>One</p><details><summary>Level 2</summary><p>Two</p>' +
+        '<details><summary>Level 3</summary><p>Three</p></details></details></details>' +
+      '<h2>Code</h2><pre><code>function hello(name) {\n  return "Hi " + name;\n}</code></pre><p>Inline <code>code()</code> and <kbd>Ctrl</kbd>+<kbd>C</kbd>.</p>' +
+      '<h2>Quote and callout</h2><blockquote><p>Quote with <strong>bold</strong>.</p></blockquote>' +
+        '<div style="border-left:4px solid #009fd9;background-color:#e5f6fc;padding:8px">Callout box (div with border and background)</div>' +
+      '<h2>Things Salesforce probably blocks</h2>' +
+        '<style>@keyframes kwpspin{from{transform:rotate(0)}to{transform:rotate(360deg)}}.kwp-spin{display:inline-block;animation:kwpspin 2s linear infinite}</style>' +
+        '<p><span class="kwp-spin" style="animation:kwpspin 2s linear infinite;display:inline-block">\u2699 spinning (CSS animation)</span></p>' +
+        '<p><marquee>Scrolling text (marquee)</marquee></p>' +
+        '<script>console.log("KA stress test script ran")<\/script>' +
+        '<p><svg width="60" height="20"><rect width="60" height="20" fill="#009fd9"></rect></svg> SVG drawing</p>' +
+        '<p><video src="https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4" controls width="200"></video> video</p>' +
+        '<p><iframe width="200" height="113" src="https://www.youtube.com/embed/dQw4w9WgXcQ"></iframe> embedded YouTube</p>' +
+        '<p><button onclick="alert(1)">Button with onclick</button> <input type="checkbox"> checkbox</p>' +
+        '<p><img src="https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png" alt="linked image" width="60"></p>' +
+      '<hr>';
+  }
+
+  async function readKa(id, rich) {
+    const r = await call('GET', '/records/' + id + '?optionalFields=' + encodeURIComponent(['Title'].concat(rich).map(f => 'Knowledge__kav.' + f).join(',')));
+    if (!r.ok) return null;
+    const parts = rich.map(f => asHtml(val(r.json, f) || '')).filter(x => x.trim());
+    return { title: val(r.json, 'Title') || '', html: parts.join('') };
+  }
+
+  async function buildStress(add, fields, rich) {
+    let gtm;
+    try { gtm = await gtmFromAudit(); } catch (e) { add(false, 'Stress: GTM list', e.message); return null; }
+    add(gtm.length > 0, 'Stress: GTM list', gtm.length + ' GTM KAs in the last audit');
+    const kas = [];
+    for (const g of gtm) { const k = await readKa(g.id, rich); if (k && k.html) kas.push(k); }
+    add(kas.length > 0, 'Stress: read GTM KAs from Salesforce', kas.length + ' read, ' + kas.reduce((s, k) => s + k.html.length, 0).toLocaleString() + ' chars of real content');
+    if (!kas.length) return null;
+    const out = {};
+    let next = 0;
+    rich.forEach((f, fi) => {
+      const label = fields[f].label || f, limit = fields[f].length || LIMIT_FALLBACK;
+      const target = Math.floor(limit * FILL), p = 'f' + fi;
+      const toc = [], body = [];
+      let html = hardBlock(p), n = 0, guard = 0;
+      while (html.length < target && guard++ < 400) {
+        const k = kas[next++ % kas.length];
+        const chunk = '<h2 id="' + p + '-ka' + n + '">GTM KA ' + (n + 1) + ': ' + esc(k.title) + '</h2>' + k.html;
+        if (html.length + chunk.length > target) {
+          // fill the rest with short paragraphs so the box is really full
+          while (html.length + 120 < target) html += '<p>' + STRESS_TAG + ' filler ' + (html.length) + ': Lorem ipsum dolor sit amet, consectetur.</p>';
+          break;
+        }
+        toc.push('<li><a href="#' + p + '-ka' + n + '">' + esc(k.title) + '</a></li>');
+        html += chunk; n++;
+      }
+      const head = '<p><em>' + STRESS_TAG + ' - ' + esc(label) + '</em></p><details><summary>Contents</summary><ol><li><a href="#' + p + '-hard">Hard block</a></li>' + toc.join('') + '</ol></details>';
+      out[label] = { html: head + html, kas: n, limit };
+    });
+    return out;
+  }
+
+  async function fillStress(add, fields, rich) {
+    const boxes = uniqueFrames();
+    if (!boxes.length) { add(false, 'Stress', 'No content boxes on screen. Click Edit (pencil) first.'); return; }
+    const plan = await buildStress(add, fields, rich);
+    if (!plan) return;
+    const sent = {};
+    const done = new Set();
+    for (const b of boxes) {
+      const key = Object.keys(plan).find(k => new RegExp('^' + k.replace(/ /g, '.?') + '$', 'i').test(b.label));
+      if (!key || done.has(key)) continue;
+      done.add(key);
+      try {
+        const doc = b.frame.contentDocument;
+        b.el.focus();
+        doc.execCommand('selectAll', false, null);
+        doc.execCommand('insertHTML', false, plan[key].html);
+        await sleep(500);
+        const inBox = b.el.innerHTML.length;
+        sent[key] = { sent: plan[key].html.length, inBox, kas: plan[key].kas, limit: plan[key].limit, feats: featuresOfStress(plan[key].html) };
+        add((b.el.innerText || '').indexOf(STRESS_TAG) !== -1, 'Stress fill ' + key,
+          plan[key].html.length.toLocaleString() + ' chars sent (limit ' + plan[key].limit.toLocaleString() + '), ' + plan[key].kas +
+          ' GTM KAs, ' + inBox.toLocaleString() + ' chars in the box after the editor' + (inBox > plan[key].limit ? ' \u2014 OVER the limit, Save may fail' : ''));
+      } catch (e) { add(false, 'Stress fill ' + key, String(e && e.message || e)); }
+    }
+    try { localStorage.setItem(SENT_KEY, JSON.stringify(sent)); } catch (e) { /* ignore */ }
+    add(true, 'Next', 'Look at the boxes, then click Save. If Salesforce says a field is too long, write down which one. Then click Test write again.');
+  }
+
+  const STRESS_CHECKS = [
+    ['Contents + anchors', 'details > summary'], ['Big table', 'table th'], ['Table inside a table', 'table table'],
+    ['Rowspan', '[rowspan]'], ['Lists 6 deep', 'ul ul ul ul ul li'], ['Numbers 6 deep', 'ol ol ol ol ol li'],
+    ['Roman numbers', 'ol[style*="roman"]'], ['Dropdowns 3 deep', 'details details details'], ['Code block', 'pre'],
+    ['Inline code', 'code'], ['Keyboard keys', 'kbd'], ['Superscript', 'sup'], ['Subscript', 'sub'], ['Quote', 'blockquote'],
+    ['Callout box', 'div[style*="border-left"]'], ['Fonts', '[style*="Georgia"], [style*="Courier"]'],
+    ['mailto link', 'a[href^="mailto:"]'], ['tel link', 'a[href^="tel:"]'], ['New tab link', 'a[target="_blank"]'],
+    ['Image from a link', 'img[src^="http"]'], ['Salesforce images (from GTM KAs)', 'img[src*="rtaImage"], img[src*="force.com"], img[src*="salesforce"]'],
+    ['CSS animation', 'style, [style*="animation"]'], ['Marquee', 'marquee'], ['Script', 'script'], ['SVG', 'svg'],
+    ['Video', 'video'], ['YouTube iframe', 'iframe'], ['Button / checkbox', 'button, input'], ['onclick', '[onclick]'],
+  ];
+  function featuresOfStress(html) {
+    const d = new DOMParser().parseFromString('<body>' + asHtml(html) + '</body>', 'text/html');
+    const has = {};
+    STRESS_CHECKS.forEach(([n, sel]) => { try { has[n] = d.querySelectorAll(sel).length; } catch (e) { has[n] = 0; } });
+    has.__kas = (asHtml(html).match(/>GTM KA \d+:/g) || []).length;
+    has.__emoji = /\u1F680/.test(asHtml(html)) ? 1 : 0;
+    has.__accents = /\u00F1/.test(asHtml(html)) ? 1 : 0;
+    return has;
+  }
+  function checkStress(add, rec, fields, rich) {
+    let sent = {};
+    try { sent = JSON.parse(localStorage.getItem(SENT_KEY) || '{}'); } catch (e) { sent = {}; }
+    let any = false;
+    rich.forEach(f => {
+      const label = fields[f].label || f, raw = val(rec.json, f) || '', html = asHtml(raw);
+      if (html.indexOf(STRESS_TAG) === -1) return;
+      any = true;
+      const s = sent[label] || {}, kept = featuresOfStress(html), before = s.feats || featuresOfStress(html);
+      const names = STRESS_CHECKS.map(c => c[0]).filter(n => before[n] > 0);
+      const ok = names.filter(n => kept[n] > 0), lost = names.filter(n => !(kept[n] > 0));
+      add(true, 'Saved: ' + label, html.length.toLocaleString() + ' chars stored (sent ' + (s.sent || 0).toLocaleString() + ', limit ' + (s.limit || fields[f].length || 0).toLocaleString() + ') \u00B7 GTM KAs complete: ' + kept.__kas + ' of ' + (s.kas != null ? s.kas : '?') +
+        ' \u00B7 emoji ' + (kept.__emoji ? 'kept' : 'LOST') + ' \u00B7 accents ' + (kept.__accents ? 'kept' : 'LOST'));
+      add(!lost.length, '   ' + label + ' formats', 'kept: ' + ok.join(', ') + (lost.length ? ' | BLOCKED/LOST: ' + lost.join(', ') : ''));
+    });
+    return any;
+  }
+
   async function runProbe() {
     const id = recordId();
     const lines = [];
@@ -282,11 +478,13 @@
     }
     const formOpen = editors().length > 0;
     if (!formOpen) {
+      if (checkStress(add, rec, fields, rich)) return done(id, lines);
       if (checkSaved(add, rec, fields, rich)) return done(id, lines);
       await formTest(add);   // explains how to open the form
       return done(id, lines);
     }
-    if (window.confirm('Edit form found.\n\nOK = fill ALL boxes with the full sample draft (headings, TOC, links, tables, lists, dropdowns, colors, images).\nCancel = just type one test line.')) await fillSample(add);
+    if (window.confirm('Edit form found.\n\nOK = STRESS TEST: fill all 5 boxes close to their limit with the real GTM KAs from Salesforce plus a hard block (big tables, deep lists, nested dropdowns, code, scripts, animations, video...).\nCancel = smaller tests.')) await fillStress(add, fields, rich);
+    else if (window.confirm('OK = fill all boxes with the small sample draft.\nCancel = just type one test line.')) await fillSample(add);
     else await formTest(add);
     done(id, lines);
   }
@@ -312,12 +510,12 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.4.1' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.5.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       (finished ? '<div style="margin-top:10px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '');
     if (finished) {
-      const text = 'KA Write Probe 0.4.1 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.5.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
