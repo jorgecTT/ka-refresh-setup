@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.3.0
+// @version      0.4.0
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -11,6 +11,10 @@
 // ==/UserScript==
 
 /*
+ * 0.4.0: with the edit form open it can fill ALL content boxes with a full
+ *   sample draft (TOC, anchors, H1-H3, colors, lists, tables, dropdowns,
+ *   images). After you Save, run it again on the article to see which
+ *   formats Salesforce kept and which it dropped.
  * 0.3.0: Salesforce does not let scripts save (the UI API is read-only with
  * the browser session, and we do not use the page's private session token).
  * So the plan is: the script FILLS the edit form and the writer clicks Save.
@@ -132,6 +136,117 @@
   }
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  // --- 0.4.0: a full sample draft in every box, then a check of what Salesforce kept ---
+  const SAMPLE_TAG = 'KA probe sample';
+  const IMG_URL = 'https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/120px-PNG_transparency_demonstration_1.png';
+  const IMG_DATA = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+  const SAMPLES = {
+    'KB Content':
+      '<p><em>' + SAMPLE_TAG + ' - KB Content</em></p>' +
+      '<details><summary>Contents</summary><ol>' +
+        '<li><a href="#sec-overview">Overview</a><ol><li><a href="#sec-updates">Updates</a></li></ol></li>' +
+        '<li><a href="#sec-steps">Steps</a></li><li><a href="#sec-table">Table</a></li></ol></details>' +
+      '<h1 id="sec-overview">1. Overview (H1)</h1>' +
+      '<p>Normal text with <strong>bold</strong>, <em>italic</em>, <u>underline</u>, <s>strikethrough</s>, ' +
+        '<span style="color:#009fd9">blue text</span>, <span style="color:#c0392b">red text</span>, ' +
+        '<span style="background-color:#fff3b0">highlight</span> and a <a href="https://help.thumbtack.com/" target="_blank">link to the Help Center</a>.</p>' +
+      '<h2 id="sec-updates">a. Updates (H2)</h2>' +
+      '<h3>i. Detail (H3)</h3>' +
+      '<ul><li>Bullet one<ul><li>Bullet inside<ul><li>Third level</li></ul></li></ul></li><li>Bullet two</li></ul>' +
+      '<h2 id="sec-steps">b. Steps (H2)</h2>' +
+      '<ol><li>Step one<ol style="list-style-type:lower-alpha"><li>Sub step a</li><li>Sub step b</li></ol></li><li>Step two</li><li>Step three</li></ol>' +
+      '<details><summary>Dropdown: click to open</summary><p>Hidden text inside the dropdown, with a <a href="#sec-overview">link back to Overview</a>.</p></details>' +
+      '<h2 id="sec-table">c. Table (H2)</h2>' +
+      '<table border="1" style="border-collapse:collapse;width:100%"><thead><tr><th>Header A</th><th>Header B</th><th>Header C</th></tr></thead>' +
+        '<tbody><tr><td>1</td><td style="background-color:#e5f6fc">2 (colored cell)</td><td>3</td></tr><tr><td colspan="2">Merged cells</td><td>6</td></tr></tbody></table>' +
+      '<blockquote>A quote block.</blockquote><hr>' +
+      '<p>Image from a link:</p><p><img src="' + IMG_URL + '" alt="sample image" width="120"></p>' +
+      '<p>Image inside the page:</p><p><img src="' + IMG_DATA + '" alt="inline image" width="32"></p>',
+    'Related Content':
+      '<p><em>' + SAMPLE_TAG + ' - Related Content</em></p>' +
+      '<details><summary>Contents</summary><ul><li><a href="#rel-links">Related links</a></li></ul></details>' +
+      '<h2 id="rel-links">Related links</h2><ul><li><a href="https://help.thumbtack.com/">Help Center</a></li>' +
+      '<li><a href="https://thumbtack.lightning.force.com/articles/Knowledge/Pro-reports">Pro reports (KA)</a></li></ul>',
+    'MC Content':
+      '<p><em>' + SAMPLE_TAG + ' - MC Content</em></p><h2>Table</h2>' +
+      '<table border="1"><tr><th>Plan</th><th>Price</th></tr><tr><td>Basic</td><td>$10</td></tr><tr><td>Plus</td><td>$20</td></tr></table>',
+    'Additional Content':
+      '<p><em>' + SAMPLE_TAG + ' - Additional Content</em></p>' +
+      '<details><summary>Dropdown one</summary><ul><li>Inside one</li></ul></details>' +
+      '<details><summary>Dropdown two</summary><ol><li>Inside two</li></ol></details>',
+    'Support Content':
+      '<p><em>' + SAMPLE_TAG + ' - Support Content</em></p>' +
+      '<p><span style="color:#009fd9"><strong>Blue bold</strong></span> and <span style="font-size:18px">bigger text</span></p>' +
+      '<p><img src="' + IMG_URL + '" alt="sample image" width="120"></p>',
+  };
+
+  // What to look for in each saved field.
+  const CHECKS = [
+    ['H1', 'h1'], ['H2', 'h2'], ['H3', 'h3'], ['Bold', 'strong, b'], ['Italic', 'em, i'],
+    ['Underline', 'u, span[style*="underline"]'], ['Strikethrough', 's, del, strike, span[style*="line-through"]'],
+    ['Text color', '[style*="color:#009fd9"], [style*="color: #009fd9"], [style*="rgb(0, 159, 217)"]'],
+    ['Highlight', '[style*="background"]'], ['Link to a website', 'a[href^="http"]'],
+    ['Dropdowns (TOC and others)', 'details > summary'], ['TOC links to sections', 'a[href^="#"]'],
+    ['Section anchors', '[id^="sec-"], [id^="rel-"], a[name^="sec-"], a[name^="rel-"]'],
+    ['Bullets', 'ul > li'], ['Bullets inside bullets', 'ul ul'], ['Numbered list', 'ol > li'], ['Numbered inside numbered', 'ol ol'],
+    ['Table', 'table'], ['Table header', 'th'], ['Merged cells', '[colspan]'], ['Quote', 'blockquote'], ['Line', 'hr'],
+    ['Image from a link', 'img[src^="http"]'], ['Image inside the page', 'img[src^="data:"]'],
+  ];
+  function featuresOf(html) {
+    const d = new DOMParser().parseFromString('<body>' + (html || '') + '</body>', 'text/html');
+    const has = {};
+    CHECKS.forEach(([name, sel]) => { try { has[name] = d.querySelectorAll(sel).length; } catch (e) { has[name] = 0; } });
+    return has;
+  }
+
+  function uniqueFrames() {
+    const seen = new Set();
+    return editors().filter(e => e.frame && !seen.has(e.el) && seen.add(e.el));
+  }
+
+  async function fillSample(add) {
+    const boxes = uniqueFrames();
+    if (!boxes.length) { add(false, 'Fill sample', 'No content boxes on screen. Click Edit (pencil) first.'); return; }
+    if (!window.confirm('Replace what is in ALL ' + boxes.length + ' content boxes with the sample draft?\n\nIt does NOT save. ' +
+      'Look at it, then click Save (this is your test KA) and click Test write again to check what Salesforce kept.')) {
+      add(false, 'Fill sample', 'Skipped (you said no)'); return;
+    }
+    const done = new Set();
+    for (const b of boxes) {
+      const key = Object.keys(SAMPLES).find(k => new RegExp('^' + k.replace(/ /g, '.?') + '$', 'i').test(b.label));
+      if (!key || done.has(key)) continue;
+      done.add(key);
+      try {
+        const doc = b.frame.contentDocument;
+        b.el.focus();
+        doc.execCommand('selectAll', false, null);
+        const ok = doc.execCommand('insertHTML', false, SAMPLES[key]);
+        await sleep(300);
+        const there = (b.el.innerText || '').indexOf(SAMPLE_TAG) !== -1;
+        add(there, 'Fill ' + key, there ? 'filled' + (ok ? '' : ' (insertHTML said no, but the text is there)') : 'did not take');
+      } catch (e) { add(false, 'Fill ' + key, String(e && e.message || e)); }
+    }
+    const missing = Object.keys(SAMPLES).filter(k => !done.has(k));
+    if (missing.length) add(false, 'Boxes not found', missing.join(', '));
+    add(true, 'Next', 'Scroll through the boxes, then click Save. After it saves, click Test write again to see what Salesforce kept.');
+  }
+
+  function checkSaved(add, rec, fields, rich) {
+    let any = false;
+    rich.forEach(f => {
+      const label = fields[f].label || f;
+      const html = val(rec.json, f) || '';
+      if (html.indexOf(SAMPLE_TAG) === -1) return;
+      any = true;
+      const sent = featuresOf(SAMPLES[label] || ''), kept = featuresOf(html);
+      const lost = Object.keys(sent).filter(k => sent[k] > 0 && !(kept[k] > 0));
+      const ok = Object.keys(sent).filter(k => sent[k] > 0 && kept[k] > 0);
+      add(!lost.length, 'Saved: ' + label, (ok.length ? 'kept: ' + ok.join(', ') : '') + (lost.length ? (ok.length ? ' | ' : '') + 'LOST: ' + lost.join(', ') : '') +
+        ' (' + html.length + ' chars)');
+    });
+    return any;
+  }
+
   async function runProbe() {
     const id = recordId();
     const lines = [];
@@ -155,7 +270,14 @@
       add(false, '2. Save to draft', 'Skipped: this is the ' + status + ' version. Click "Edit as Draft", open the draft, and run the test there.');
       return done(id, lines);
     }
-    await formTest(add);
+    const formOpen = editors().length > 0;
+    if (!formOpen) {
+      if (checkSaved(add, rec, fields, rich)) return done(id, lines);
+      await formTest(add);   // explains how to open the form
+      return done(id, lines);
+    }
+    if (window.confirm('Edit form found.\n\nOK = fill ALL boxes with the full sample draft (headings, TOC, links, tables, lists, dropdowns, colors, images).\nCancel = just type one test line.')) await fillSample(add);
+    else await formTest(add);
     done(id, lines);
   }
 
@@ -180,12 +302,12 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.3.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.4.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       (finished ? '<div style="margin-top:10px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '');
     if (finished) {
-      const text = 'KA Write Probe 0.3.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.4.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
