@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.5.2
+// @version      0.6.0
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -13,6 +13,10 @@
 // ==/UserScript==
 
 /*
+ * 0.6.0: FIGMA test, the documented way (Field Enablement guide "iFrames in
+ *   Salesforce"): the Figma EMBED link goes in Multimedia and an iframe to
+ *   Salesforce's own KnowledgeIFrame page, with the draft's record id, goes
+ *   in Media. A direct figma.com iframe is removed on save.
  * 0.5.2: the hard block starts with the Pro App Simulator Figma prototype
  *   (already linked from a published KA) as an embed and as a button link.
  * 0.5.0: STRESS test. Reads the GTM KAs of the last audit straight from
@@ -461,6 +465,77 @@
     return any;
   }
 
+  // --- 0.6.0: Figma the documented way (Nichole's guide "iFrames in Salesforce") ---
+  // Multimedia = Figma EMBED link; Media = iframe to Salesforce's own KnowledgeIFrame page with the DRAFT record id.
+  const FIGMA_EMBED = 'https://embed.figma.com/proto/wJzer6HhDQ8a2tJ0tOAPNE/Thumbtack-Pro-App---Simulator?page-id=0%3A1&node-id=11-2&starting-point-node-id=1%3A3&embed-host=share';
+  const kiframe = id => '<p><iframe width="400" height="600" frameborder="2" scrolling="auto" src="https://thumbtack--c.vf.force.com/apex/KnowledgeIFrame?id=' + id + '"></iframe></p>';
+  const FIGMA_LABELS = { multi: /^multimedia$/i, media: /^media$/i };
+
+  function figmaFields(fields) {
+    const find = re => Object.keys(fields).find(k => re.test(fields[k].label || '') || re.test(k.replace(/__c$/, '')));
+    return { multi: find(FIGMA_LABELS.multi), media: find(FIGMA_LABELS.media) };
+  }
+  function describeField(fields, k) {
+    if (!k) return 'not found';
+    const f = fields[k];
+    return k + ' (' + f.dataType + (f.htmlFormatted ? ', rich text' : '') + (f.length ? ', ' + f.length + ' chars' : '') + (f.updateable ? '' : ', READ-ONLY') + ')';
+  }
+  // A plain input (text/url) in the edit form, found by its label.
+  function inputByLabel(re) {
+    return deepAll(document, 'input, textarea').filter(shown).find(el => re.test((labelOf(el) || '').replace(/[*\s]+$/g, '').replace(/^\*\s*/, '')));
+  }
+  function typeInto(el, text) {
+    el.focus();
+    if (el.select) el.select();
+    const ok = document.execCommand('insertText', false, text);
+    if (!ok || el.value !== text) {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    el.blur();
+    return el.value === text;
+  }
+
+  async function fillFigma(add, id, fields) {
+    const ff = figmaFields(fields);
+    add(!!ff.multi, 'Figma: Multimedia field', describeField(fields, ff.multi));
+    add(!!ff.media, 'Figma: Media field', describeField(fields, ff.media));
+    // 1. Multimedia = the Figma embed link
+    const mInput = inputByLabel(FIGMA_LABELS.multi);
+    if (mInput) add(typeInto(mInput, FIGMA_EMBED), 'Figma: put the embed link in Multimedia', FIGMA_EMBED.slice(0, 70) + '\u2026');
+    else add(false, 'Figma: Multimedia box', 'Not found in the edit form. Paste this into Multimedia by hand: ' + FIGMA_EMBED);
+    // 2. Media = the KnowledgeIFrame iframe with THIS draft's id
+    const code = kiframe(id);
+    const mediaFrame = uniqueFrames().find(e => FIGMA_LABELS.media.test(e.label || ''));
+    const mediaInput = mediaFrame ? null : inputByLabel(FIGMA_LABELS.media);
+    if (mediaFrame) {
+      const doc = mediaFrame.frame.contentDocument;
+      mediaFrame.el.focus(); doc.execCommand('selectAll', false, null); doc.execCommand('insertHTML', false, code);
+      await sleep(400);
+      add(!!mediaFrame.el.querySelector('iframe[src*="KnowledgeIFrame"]'), 'Figma: put the iframe in Media', 'rich text box \u00B7 id ' + id);
+    } else if (mediaInput) {
+      add(typeInto(mediaInput, code), 'Figma: put the iframe in Media', 'text box \u00B7 id ' + id);
+    } else {
+      add(false, 'Figma: Media box', 'Not found in the edit form. In Media, click Embed and paste: ' + code);
+    }
+    add(true, 'Next', 'Click Save, open the article and look for the Pro App Simulator. Then click Test write again.');
+  }
+
+  function checkFigma(add, rec, fields, id) {
+    const ff = figmaFields(fields);
+    const m = ff.multi ? String(val(rec.json, ff.multi) || '') : '';
+    const media = ff.media ? asHtml(String(val(rec.json, ff.media) || '')) : '';
+    if (m.indexOf('embed.figma.com') === -1 && media.indexOf('KnowledgeIFrame') === -1) return false;
+    add(m.indexOf('embed.figma.com') !== -1, 'Saved: Multimedia', m ? m.slice(0, 90) : 'empty');
+    const idOk = media.indexOf('id=' + id) !== -1;
+    add(media.indexOf('KnowledgeIFrame') !== -1, 'Saved: Media', media ? (idOk ? 'iframe kept, uses this draft\'s id' : 'iframe kept, but the id is not this record\'s') : 'empty');
+    const onPage = deepAll(document, 'iframe').some(f => /KnowledgeIFrame/.test(f.getAttribute('src') || ''));
+    add(onPage, 'On the page', onPage ? 'The KnowledgeIFrame frame is on the page. Look at it: you should see the Pro App Simulator.' : 'No KnowledgeIFrame frame on the page yet (scroll to the Media field and run again).');
+    return true;
+  }
+
   async function runProbe() {
     const id = recordId();
     const lines = [];
@@ -473,7 +548,8 @@
     if (!info.ok) { add(false, '1. Read the article fields', 'HTTP ' + info.status + ' ' + info.err); return done(id, lines); }
     const fields = info.json.fields || {};
     const rich = Object.keys(fields).filter(k => fields[k].dataType === 'TextArea' && fields[k].htmlFormatted && fields[k].updateable);
-    const want = ['Title', 'PublishStatus', 'VersionNumber', 'ArticleNumber'].concat(rich).map(f => 'Knowledge__kav.' + f);
+    const ffs = figmaFields(fields);
+    const want = ['Title', 'PublishStatus', 'VersionNumber', 'ArticleNumber'].concat(rich, [ffs.multi, ffs.media].filter(Boolean)).map(f => 'Knowledge__kav.' + f);
     const rec = await call('GET', '/records/' + id + '?optionalFields=' + encodeURIComponent(want.join(',')));
     if (!rec.ok) { add(false, '1. Read the article', 'HTTP ' + rec.status + ' ' + rec.err); return done(id, lines); }
     const status = val(rec.json, 'PublishStatus'), title = val(rec.json, 'Title');
@@ -486,12 +562,14 @@
     }
     const formOpen = editors().length > 0;
     if (!formOpen) {
+      if (checkFigma(add, rec, fields, id)) return done(id, lines);
       if (checkStress(add, rec, fields, rich)) return done(id, lines);
       if (checkSaved(add, rec, fields, rich)) return done(id, lines);
       await formTest(add);   // explains how to open the form
       return done(id, lines);
     }
-    if (window.confirm('Edit form found.\n\nOK = STRESS TEST: fill all 5 boxes close to their limit with the real GTM KAs from Salesforce plus a hard block (big tables, deep lists, nested dropdowns, code, scripts, animations, video...).\nCancel = smaller tests.')) await fillStress(add, fields, rich);
+    if (window.confirm('Edit form found.\n\nOK = FIGMA TEST: put the Pro App Simulator in this draft the way Nichole documented it (embed link in Multimedia, KnowledgeIFrame iframe in Media).\nCancel = other tests.')) await fillFigma(add, id, fields);
+    else if (window.confirm('OK = STRESS TEST: fill all 5 boxes close to their limit with the real GTM KAs from Salesforce plus a hard block (big tables, deep lists, nested dropdowns, code, scripts, animations, video...).\nCancel = smaller tests.')) await fillStress(add, fields, rich);
     else if (window.confirm('OK = fill all boxes with the small sample draft.\nCancel = just type one test line.')) await fillSample(add);
     else await formTest(add);
     done(id, lines);
@@ -519,13 +597,13 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.5.2' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.6.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       '';
     if (finished) {
-      const text = 'KA Write Probe 0.5.2 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.6.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
