@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.6.1
+// @version      0.7.0
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -13,6 +13,11 @@
 // ==/UserScript==
 
 /*
+ * 0.7.0: IMAGE test. Embedded (data:) images are removed on save, but a
+ *   picture a writer pastes or drops is uploaded by the editor. The probe makes
+ *   a test PNG and pastes it (then drops it, if paste does nothing) under a
+ *   test heading in KB Content; after Save it checks the image is a Salesforce
+ *   file.
  * 0.6.0: FIGMA test, the documented way (Field Enablement guide "iFrames in
  *   Salesforce"): the Figma EMBED link goes in Multimedia and an iframe to
  *   Salesforce's own KnowledgeIFrame page, with the draft's record id, goes
@@ -556,6 +561,81 @@
     return true;
   }
 
+  // --- 0.7.0: IMAGE test. Paste (and if needed drop) a real image file into KB Content, like a writer would ---
+  const IMG_TAG = 'KA image paste test';
+  function makePng(label) {
+    return new Promise(resolve => {
+      const c = document.createElement('canvas'); c.width = 360; c.height = 140;
+      const g = c.getContext('2d');
+      g.fillStyle = '#009fd9'; g.fillRect(0, 0, 360, 140);
+      g.fillStyle = '#ffffff'; g.font = 'bold 22px sans-serif'; g.fillText(IMG_TAG, 18, 52);
+      g.font = '16px sans-serif'; g.fillText(label + ' \u00B7 ' + new Date().toISOString().slice(0, 16), 18, 90);
+      c.toBlob(b => resolve(new File([b], 'ka-image-test-' + label + '.png', { type: 'image/png' })), 'image/png');
+    });
+  }
+  function nearImgs(body) {
+    const h = Array.from(body.querySelectorAll('h2')).find(x => (x.innerText || '').indexOf(IMG_TAG) !== -1);
+    if (!h) return [];
+    const out = [];
+    for (let n = h.nextElementSibling, i = 0; n && i < 3; n = n.nextElementSibling, i++) {
+      if (/^H[1-3]$/.test(n.tagName)) break;
+      (n.tagName === 'IMG' ? [n] : Array.from(n.querySelectorAll('img'))).forEach(im => out.push(im.getAttribute('src') || ''));
+    }
+    return out;
+  }
+  const imgsIn = el => Array.from(el.querySelectorAll('img')).map(i => i.getAttribute('src') || '');
+  const kindOf = src => /^data:/.test(src) ? 'embedded (data:)' : /^blob:/.test(src) ? 'blob (still uploading?)' :
+    /rtaImage|servlet|file\.force\.com|content\.force\.com|\/sfc\//i.test(src) ? 'Salesforce file' : (src ? 'link: ' + src.slice(0, 50) : 'none');
+
+  async function fillImage(add) {
+    const kb = uniqueFrames().find(e => /KB.?Content/i.test(e.label || '')) || uniqueFrames()[0];
+    if (!kb) { add(false, 'Image test', 'No content box on screen. Click Edit (pencil) first.'); return; }
+    const doc = kb.frame.contentDocument, body = kb.el;
+    // marker heading at the top, caret right after it
+    body.focus();
+    const sel = doc.defaultView.getSelection(); let r = doc.createRange();
+    r.setStart(body, 0); r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
+    doc.execCommand('insertHTML', false, '<h2>' + IMG_TAG + '</h2><p id="kwp-img-here"><br></p>');
+    const here = doc.getElementById('kwp-img-here') || body;
+    const caret = () => { const rr = doc.createRange(); rr.selectNodeContents(here); rr.collapse(false); sel.removeAllRanges(); sel.addRange(rr); };
+    const tries = [
+      ['paste', async () => { const f = await makePng('paste'); const dt = new DataTransfer(); dt.items.add(f);
+        caret(); body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); }],
+      ['drop', async () => { const f = await makePng('drop'); const dt = new DataTransfer(); dt.items.add(f);
+        caret(); const rect = here.getBoundingClientRect();
+        const o = { dataTransfer: dt, bubbles: true, cancelable: true, clientX: rect.left + 5, clientY: rect.top + 5 };
+        here.dispatchEvent(new DragEvent('dragenter', o)); here.dispatchEvent(new DragEvent('dragover', o)); here.dispatchEvent(new DragEvent('drop', o)); }],
+    ];
+    let done = false;
+    for (const [name, run] of tries) {
+      try { await run(); } catch (e) { add(false, 'Image: ' + name, String(e && e.message || e)); continue; }
+      let near = [];
+      for (let i = 0; i < 16; i++) {
+        await sleep(500);
+        near = nearImgs(body);
+        if (near.length && !near.some(x => /^blob:/.test(x))) break;
+      }
+      const got = near.length > 0;
+      add(got, 'Image: ' + name, got ? 'image under the test heading: ' + near.map(kindOf).join(', ') : 'nothing appeared');
+      if (got) { done = true; break; }
+    }
+    if (!done) add(false, 'Image: Insert dialog', 'Neither worked. Next test would be Insert > Image > Upload. Tell Claude.');
+    add(true, 'Next', 'Look at the box: is the blue "' + IMG_TAG + '" picture under the heading? Click Save, then Test write again.');
+  }
+
+  function checkImage(add, rec, fields, rich) {
+    const kbKey = rich.find(f => /KB.?Content/i.test(fields[f].label || '')) || rich[0];
+    const html = asHtml(String(val(rec.json, kbKey) || ''));
+    const at = html.indexOf(IMG_TAG);
+    if (at === -1) return false;
+    const after = html.slice(at, at + 3000);
+    const srcs = (after.match(/<img[^>]+src="([^"]+)"/gi) || []).map(t => (t.match(/src="([^"]+)"/i) || [])[1] || '').filter(s => s.indexOf('wikimedia') === -1);
+    const sf = srcs.filter(s => kindOf(s) === 'Salesforce file');
+    add(sf.length > 0, 'Saved: pasted image', srcs.length ? srcs.map(kindOf).join(', ') + (sf.length ? ' \u2014 uploaded to Salesforce, it stays' : '') : 'no image under the test heading (it was removed on save)');
+    if (sf[0]) add(true, 'Image address', sf[0].slice(0, 120));
+    return true;
+  }
+
   async function runProbe() {
     const id = recordId();
     const lines = [];
@@ -582,13 +662,15 @@
     }
     const formOpen = editors().length > 0;
     if (!formOpen) {
+      if (checkImage(add, rec, fields, rich)) return done(id, lines);
       if (checkFigma(add, rec, fields, id)) return done(id, lines);
       if (checkStress(add, rec, fields, rich)) return done(id, lines);
       if (checkSaved(add, rec, fields, rich)) return done(id, lines);
       await formTest(add);   // explains how to open the form
       return done(id, lines);
     }
-    if (window.confirm('Edit form found.\n\nOK = FIGMA TEST: put the Pro App Simulator in this draft the way Nichole documented it (embed link in Multimedia, KnowledgeIFrame iframe in Media).\nCancel = other tests.')) await fillFigma(add, id, fields);
+    if (window.confirm('Edit form found.\n\nOK = IMAGE TEST: paste a test picture into KB Content like a writer would (and drag-and-drop if paste does not work), to see if Salesforce uploads it.\nCancel = other tests.')) await fillImage(add);
+    else if (window.confirm('OK = FIGMA TEST: put the Pro App Simulator in this draft the way Nichole documented it (embed link in Multimedia, KnowledgeIFrame iframe in Media).\nCancel = other tests.')) await fillFigma(add, id, fields);
     else if (window.confirm('OK = STRESS TEST: fill all 5 boxes close to their limit with the real GTM KAs from Salesforce plus a hard block (big tables, deep lists, nested dropdowns, code, scripts, animations, video...).\nCancel = smaller tests.')) await fillStress(add, fields, rich);
     else if (window.confirm('OK = fill all boxes with the small sample draft.\nCancel = just type one test line.')) await fillSample(add);
     else await formTest(add);
@@ -617,13 +699,13 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.6.1' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.7.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       '';
     if (finished) {
-      const text = 'KA Write Probe 0.6.1 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.7.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
