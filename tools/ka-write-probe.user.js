@@ -1,32 +1,25 @@
 // ==UserScript==
 // @name         KA Write Probe (test only)
 // @namespace    ka-write-probe
-// @version      0.2.0
+// @version      0.3.0
 // @description  TEST ONLY. Checks whether a script can save changes to a KA DRAFT in Salesforce (needed for an "Update from Doc" button). Only works on drafts, never publishes, and puts back what it changes.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
 // @grant        GM_addStyle
 // @grant        GM_registerMenuCommand
-// @grant        unsafeWindow
 // @run-at       document-idle
 // ==/UserScript==
 
 /*
- * 0.2.0: the UI API answered 401 for writes (reads only). Now it also tries
- *   A. Lightning's own save channel (Aura "updateRecord"), the same call the
- *      page makes when you click Save.
- *   B. The edit form: with the draft open in Edit, it puts a test line in the
- *      KB Content box WITHOUT saving (you click Cancel afterwards).
+ * 0.3.0: Salesforce does not let scripts save (the UI API is read-only with
+ * the browser session, and we do not use the page's private session token).
+ * So the plan is: the script FILLS the edit form and the writer clicks Save.
+ * This probe finds the content boxes of the open edit form (or the "Source
+ * Code" dialog) and types one test line at the end of one box, the same way
+ * a person would. It never saves: click Cancel afterwards.
  *
- * Open a KA, click "Edit as Draft" so you are on the DRAFT version, then click
- * the "Test write" button (top left). It runs:
- *   1. Read the article's fields (which ones hold the content, is it a draft).
- *   2. Save the SAME title back to the draft (changes nothing, tests access).
- *   3. Only if 2 worked and you say OK: add one test line to the first content
- *      field, check it is there, then put the field back as it was and check.
- * It stops at step 1 on a published article: published versions are never
- * touched. Nothing is ever published. Use a test KA (e.g. MTS Test Article).
- * Results can be copied with "Copy results".
+ * Use: open a DRAFT test KA, click Edit (pencil), optionally open the Source
+ * Code dialog of KB Content, then click "Test write" (top left).
  */
 
 (function () {
@@ -63,79 +56,79 @@
 
   const val = (rec, f) => (rec && rec.fields && rec.fields[f] && rec.fields[f].value != null) ? rec.fields[f].value : null;
 
-  // --- Lightning's own channel (Aura) ---
-  function auraToken(A) {
-    const cs = A && A.clientService;
-    const c = [cs && cs._token, cs && cs.token, cs && typeof cs.getToken === 'function' ? cs.getToken() : null];
-    for (const x of c) if (x) return x;
-    return null;
-  }
-  async function auraUpdate(id, fields) {
-    const A = unsafeWindow.$A;
-    if (!A) return { ok: false, err: 'Lightning framework ($A) not found on the page' };
-    const token = auraToken(A);
-    if (!token) return { ok: false, err: 'Could not get the page session token' };
-    let context;
-    try { context = A.getContext().encodeForServer(); } catch (e) { return { ok: false, err: 'No page context: ' + e.message }; }
-    const message = { actions: [{
-      id: '1;a', descriptor: 'aura://RecordUiController/ACTION$updateRecord', callingDescriptor: 'UNKNOWN',
-      params: { recordId: id, recordInput: { allowSaveOnDuplicate: false, apiName: 'Knowledge__kav', fields: Object.assign({ Id: id }, fields) }, clientOptions: {} },
-    }] };
-    const body = new URLSearchParams({
-      message: JSON.stringify(message),
-      'aura.context': typeof context === 'string' ? context : JSON.stringify(context),
-      'aura.pageURI': location.pathname + location.search,
-      'aura.token': token,
-    });
-    try {
-      const resp = await fetch('/aura?r=1&aura.RecordUi.updateRecord=1', {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' }, body: body.toString(),
-      });
-      const text = (await resp.text()).replace(/^while\(1\);\s*/, '');
-      if (!resp.ok) return { ok: false, err: 'HTTP ' + resp.status };
-      let json; try { json = JSON.parse(text); } catch (e) { return { ok: false, err: 'Answer is not JSON' }; }
-      const a = (json.actions || [])[0] || {};
-      if (a.state === 'SUCCESS') return { ok: true };
-      const e = (a.error || [])[0] || {};
-      const msg = e.message || (e.event && e.event.attributes && JSON.stringify(e.event.attributes.values).slice(0, 200)) ||
-        (e.data && JSON.stringify(e.data).slice(0, 240)) || '';
-      return { ok: false, err: (a.state || 'no state') + (msg ? ' - ' + msg : '') };
-    } catch (e) { return { ok: false, err: String(e && e.message || e) }; }
-  }
-
-  // --- The edit form: rich text boxes (lightning-input-rich-text) ---
+  // --- The edit form: find the content boxes, whatever editor draws them ---
   function deepAll(root, sel, out) {
     out = out || [];
     root.querySelectorAll(sel).forEach(el => out.push(el));
     root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) deepAll(el.shadowRoot, sel, out); });
     return out;
   }
-  function richBoxes() {
-    return deepAll(document, 'lightning-input-rich-text').filter(el => el.getBoundingClientRect().height > 0)
-      .map(el => ({ el, label: (el.label || el.getAttribute('label') || (el.closest && el.closest('[data-target-selection-name]') && el.closest('[data-target-selection-name]').getAttribute('data-target-selection-name')) || '').toString() }));
+  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 40 && r.height > 20; };
+  function labelOf(el) {
+    const direct = el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('label'));
+    if (direct) return direct;
+    for (let cur = el, i = 0; cur && i < 12; i++) {
+      const lab = cur.querySelector && cur.querySelector('label, .slds-form-element__label, legend');
+      if (lab && lab.innerText && lab.innerText.trim().length < 60) return lab.innerText.trim();
+      cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host);
+    }
+    return '';
   }
+  function editors() {
+    const out = [];
+    const dialogOpen = deepAll(document, 'h1, h2, .slds-modal__title').some(h => /source code/i.test(h.innerText || '') && shown(h));
+    deepAll(document, '.CodeMirror, .cm-editor, .ace_editor, .monaco-editor').filter(shown)
+      .forEach(el => out.push({ kind: 'code editor', el, label: dialogOpen ? 'Source Code dialog' : labelOf(el), code: true }));
+    deepAll(document, 'textarea').filter(shown)
+      .forEach(el => out.push({ kind: 'textarea', el, label: dialogOpen ? 'Source Code dialog' : labelOf(el), code: dialogOpen }));
+    deepAll(document, '[contenteditable="true"]').filter(shown)
+      .forEach(el => out.push({ kind: 'rich text box', el, label: labelOf(el) }));
+    deepAll(document, 'iframe').filter(shown).forEach(f => {
+      try {
+        const d = f.contentDocument, body = d && d.body;
+        if (body && (body.isContentEditable || d.designMode === 'on')) out.push({ kind: 'rich text box (frame)', el: body, frame: f, label: labelOf(f) });
+      } catch (e) { /* other domain */ }
+    });
+    return out;
+  }
+  function textOf(e) { return e.kind === 'textarea' ? (e.el.value || '') : (e.el.innerText || ''); }
+
   async function formTest(add) {
-    const boxes = richBoxes();
-    if (!boxes.length) {
-      add(false, 'B. Edit form', 'No edit form open. To test this: on the draft click Edit (pencil), then click Test write again.');
+    const eds = editors();
+    if (!eds.length) {
+      add(false, '2. Edit form', 'No content box on screen. Click Edit (pencil) on the draft, wait for the content boxes, then click Test write again.');
       return;
     }
-    add(true, 'B. Edit form found', boxes.length + ' content boxes: ' + boxes.map(b => b.label || '(no label)').join(', '));
-    const kb = boxes.find(b => /KB.?Content/i.test(b.label)) || boxes[0];
-    if (!window.confirm('B. Put a test line in the "' + (kb.label || 'first') + '" box of the open edit form?\n\nIt does NOT save. After the test, click Cancel on the form.')) {
-      add(false, 'B. Fill the form', 'Skipped (you said no)'); return;
+    add(true, '2. Content boxes found', eds.map(e => e.kind + ' "' + (e.label || 'no label') + '" (' + textOf(e).length + ' chars)').join(' | '));
+    const target = eds.find(e => e.code) || eds.find(e => /KB.?Content/i.test(e.label)) ||
+      eds.slice().sort((x, y) => textOf(y).length - textOf(x).length)[0];
+    if (!window.confirm('3. Type a test line at the end of: ' + target.kind + ' "' + (target.label || 'no label') + '"?\n\n' +
+      'It does NOT save. After the test, click Cancel (on the dialog and on the form).')) {
+      add(false, '3. Fill a box', 'Skipped (you said no)'); return;
     }
+    const line = target.code ? '<p>' + MARKER + '</p>' : MARKER;
+    let how = '';
     try {
-      const before = kb.el.value || '';
-      kb.el.value = before + '<p>' + MARKER + '</p>';
-      kb.el.dispatchEvent(new CustomEvent('change', { bubbles: true, composed: true, detail: { value: kb.el.value } }));
-      await sleep(800);
-      const shown = deepAll(kb.el.shadowRoot || kb.el, '[contenteditable="true"]').map(x => x.innerText).join(' ');
-      add(shown.indexOf(MARKER) !== -1, 'B. Fill the form', shown.indexOf(MARKER) !== -1
-        ? 'The test line shows in the box. Now click Cancel on the form (nothing was saved).'
-        : 'Value set but the box did not show it (' + (kb.el.value || '').length + ' chars). Click Cancel on the form.');
-    } catch (e) { add(false, 'B. Fill the form', String(e && e.message || e)); }
+      const doc = target.frame ? target.frame.contentDocument : document;
+      const el = target.el;
+      const focusEl = target.kind === 'code editor' ? (el.querySelector('textarea, .cm-content, [contenteditable="true"]') || el) : el;
+      focusEl.focus();
+      if (target.kind === 'textarea') {
+        el.selectionStart = el.selectionEnd = el.value.length;
+      } else {
+        const sel = (doc.defaultView || window).getSelection(), range = doc.createRange();
+        range.selectNodeContents(target.kind === 'code editor' ? (el.querySelector('.CodeMirror-code, .cm-content') || el) : el);
+        range.collapse(false); sel.removeAllRanges(); sel.addRange(range);
+      }
+      // Same as typing: the editor sees normal input, so it keeps its own copy in sync.
+      if (doc.execCommand('insertText', false, '\n' + line)) how = 'typed';
+      else if (target.kind === 'textarea') { el.value += '\n' + line; el.dispatchEvent(new Event('input', { bubbles: true })); how = 'set value + input event'; }
+      else how = 'typing was refused';
+    } catch (e) { how = 'error: ' + (e && e.message || e); }
+    await sleep(600);
+    const ok = textOf(target).indexOf(MARKER) !== -1;
+    add(ok, '3. Fill a box', (ok ? 'The test line shows in the box (' + how + ').' : 'The line did not show (' + how + ').') +
+      ' Now click Cancel so nothing is saved.');
   }
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -162,43 +155,7 @@
       add(false, '2. Save to draft', 'Skipped: this is the ' + status + ' version. Click "Edit as Draft", open the draft, and run the test there.');
       return done(id, lines);
     }
-    // B first when an edit form is open (it never saves).
-    if (richBoxes().length) { await formTest(add); return done(id, lines); }
-
-    // 2. Save the same title back (no change).
-    const w1 = await call('PATCH', '/records/' + id, { fields: { Title: title } });
-    add(w1.ok, '2. Save to draft (no change), UI API', w1.ok ? 'HTTP ' + w1.status + ' in ' + w1.ms + ' ms' : 'HTTP ' + w1.status + ' ' + w1.err);
-    let save = w1.ok ? (flds) => call('PATCH', '/records/' + id, { fields: flds }) : null;
-    if (!w1.ok) {
-      const a1 = await auraUpdate(id, { Title: title });
-      add(a1.ok, 'A. Save to draft (no change), Lightning channel', a1.ok ? 'worked' : a1.err);
-      if (a1.ok) save = (flds) => auraUpdate(id, flds);
-    }
-    if (!save) {
-      add(false, 'B. Edit form', 'Next: on this draft click Edit (pencil), then click Test write again to test filling the form.');
-      return done(id, lines);
-    }
-
-    // 3. Add a test line to the first content field, check, put it back, check.
-    const f = withContent[0] || rich[0];
-    if (!f) { add(false, '3. Content test', 'No content field found'); return done(id, lines); }
-    if (!window.confirm('Step 2 worked.\n\nStep 3 adds one test line to "' + (fields[f].label || f) +
-      '" in this DRAFT, checks it, and then puts the field back exactly as it was.\n\nRun step 3?')) {
-      add(false, '3. Content test', 'Skipped (you said no)'); return done(id, lines);
-    }
-    const original = val(rec.json, f) || '';
-    const w2 = await save({ [f]: original + '<p>' + MARKER + '</p>' });
-    add(w2.ok, '3a. Add a test line', w2.ok ? 'saved' : (w2.status ? 'HTTP ' + w2.status + ' ' : '') + w2.err);
-    if (!w2.ok) return done(id, lines);
-    const r2 = await call('GET', '/records/' + id + '?optionalFields=Knowledge__kav.' + f);
-    const saved = val(r2.json, f) || '';
-    add(saved.indexOf(MARKER) !== -1, '3b. Check it is there', saved.indexOf(MARKER) !== -1 ? 'yes' : 'not found after saving');
-    const w3 = await save({ [f]: original });
-    const r3 = await call('GET', '/records/' + id + '?optionalFields=Knowledge__kav.' + f);
-    const back = val(r3.json, f) || '';
-    const restored = w3.ok && back.indexOf(MARKER) === -1;
-    add(restored, '3c. Put it back', !w3.ok ? (w3.status ? 'HTTP ' + w3.status + ' ' : '') + w3.err + ' \u2014 delete the test line by hand'
-      : back === original ? 'exactly as before' : 'test line removed (Salesforce reformatted ' + Math.abs(back.length - original.length) + ' characters)');
+    await formTest(add);
     done(id, lines);
   }
 
@@ -223,12 +180,12 @@
   function render(id, lines, running, finished) {
     let box = document.getElementById('kwp-box');
     if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
-    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.2.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
+    box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">KA Write Probe 0.3.0' + (running ? ' \u00B7 running\u2026' : '') + '</div>' +
       lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
         (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('') +
       (finished ? '<div style="margin-top:10px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '');
     if (finished) {
-      const text = 'KA Write Probe 0.2.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+      const text = 'KA Write Probe 0.3.0 - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
       document.getElementById('kwp-copy').onclick = async () => {
         try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
         catch (e) { window.prompt('Copy this:', text); }
