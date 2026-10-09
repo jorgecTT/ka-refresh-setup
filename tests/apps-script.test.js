@@ -412,4 +412,16 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
   assert.ok(!row('Brand new'), 'last week\'s new KA is not new again');
 });
 
+test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
+  const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
+  const v = post(g, { secret: 's', action: 'version' });
+  assert.strictEqual(v.server, '2.4.2');
+  assert.ok(v.actions.includes('weekly'));
+  const bad = post(g, { secret: 's', action: 'nope' });
+  assert.strictEqual(bad.code, 'BAD_ACTION');
+  assert.strictEqual(bad.server, '2.4.2');
+  const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
+  assert.strictEqual(get.server, '2.4.2');
+});
+
 if (require.main === module) console.log('\n' + passed + ' passed');

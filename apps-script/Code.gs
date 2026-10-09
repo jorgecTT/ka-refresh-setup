@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.4.1)
+ * KA Sync v2 — Google Apps Script backend (v2.4.2)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,11 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.4.2 (diagnostics)
+ *   - Every answer says which Code.gs is running ("server": "2.4.2"), and
+ *     <web app URL>?version=1 shows it in the browser, so an old deployment
+ *     (or another .gs file with its own doPost) is easy to spot.
  *
  * v2.4.1 (weekly report)
  *   - Only the changes: updated (new version / minor edit), new and archived
@@ -92,6 +97,8 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
+var CODE_VERSION = '2.4.2';
+var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
 function _sharedSecret() {
@@ -140,8 +147,9 @@ function doPost(e) {
       case 'audit':   return _json(handleAudit(req));
       case 'auditDocs': return _json(handleAuditDocs());
       case 'weekly':  return _json(handleWeekly(req));
+      case 'version': return _json({ ok: true, actions: CODE_ACTIONS });
       default:
-        return _json({ ok: false, error: 'Unknown action: ' + action, code: 'BAD_ACTION' });
+        return _json({ ok: false, error: 'Unknown action: ' + action + ' (KA Sync ' + CODE_VERSION + ')', code: 'BAD_ACTION' });
     }
   } catch (err) {
     return _json({
@@ -560,6 +568,7 @@ function findDocByKaIdOrUrl(targetKaId, targetUrl) {
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
 function _json(obj) {
+  if (obj && typeof obj === 'object' && !Array.isArray(obj) && obj.server == null) obj.server = CODE_VERSION;
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
@@ -1425,7 +1434,11 @@ function handleArchive(req) {
   return { ok: true, moved: moved, errors: errors, by: by, at: when };
 }
 
-function doGet() {
+function doGet(e) {
+  // <web app URL>?version=1 -> which Code.gs this deployment is running
+  if (e && e.parameter && e.parameter.version) {
+    return _json({ ok: true, app: 'KA Sync v2', actions: CODE_ACTIONS });
+  }
   return HtmlService.createHtmlOutput(DASHBOARD_HTML)
     .setTitle('KA Index — Live & Archived')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');

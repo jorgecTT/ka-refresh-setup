@@ -9,13 +9,14 @@ const { execSync } = require('child_process');
 const { chromium } = require(path.join(execSync('npm root -g').toString().trim(), 'playwright'));
 const SF = 'https://thumbtack.lightning.force.com';
 
-async function run(refuseDates) {
+async function run(refuseDates, oldBackend) {
   const b = await chromium.launch(); const p = await b.newPage(); const errs = []; p.on('pageerror', e => errs.push(e.message));
   p.on('dialog', d => d.accept());
   const posts = [], asked = [];
   await p.exposeFunction('__gm', (url, body) => {
     const req = JSON.parse(body || '{}');
     posts.push(req);
+    if (req.action === 'weekly' && oldBackend) return JSON.stringify({ ok: false, code: 'BAD_ACTION', error: 'Unknown action: weekly' });
     if (req.action === 'weekly') return JSON.stringify({ ok: true, counts: { NEW: 1, NEW_VERSION: 2, MINOR_EDIT: 3, ARCHIVED: 1 }, week: 'Oct 3 – Oct 10', firstRun: true, sheetUrl: 'https://docs.google.com/spreadsheets/d/x/edit' });
     return JSON.stringify({ ok: true });
   });
@@ -81,6 +82,12 @@ async function run(refuseDates) {
   assert.ok(/Weekly report sent/.test(r.overlay), r.overlay);
   assert.strictEqual(r.weekly.published[0].lastModifiedBy, 'Nichole Jensen', 'still has the editor without the dates');
   assert.strictEqual(r.weekly.published[0].firstPublished, '');
+  assert.deepStrictEqual(r.errs, []);
+  // an old Code.gs answers "unknown action": the box says so and how to check it
+  r = await run(false, true);
+  console.log('OLD BACKEND:', r.overlay);
+  assert.ok(/Weekly report stopped: Google is running a Code\.gs older than 2\.4\.2/.test(r.overlay), r.overlay);
+  assert.ok(/only Code\.gs/.test(r.overlay) && /"server":"2\.4\.2"/.test(r.overlay), r.overlay);
   assert.deepStrictEqual(r.errs, []);
   console.log('\nweekly e2e ok');
 })().catch(e => { console.error(e); process.exit(1); });

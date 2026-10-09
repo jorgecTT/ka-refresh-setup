@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.7.1
+// @version      2.7.2
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -76,6 +76,7 @@
  *   "Desactualizado" (ka_audit tab). "Refresh all" stays for code/format
  *   changes that need every Doc rebuilt.
  *
+ * v2.7.2 - When the Google Script is too old, it says which version is live and how to check it.
  * v2.7.1 - Weekly report: adds archived KAs (and who archived them), no Drive sync info.
  * v2.7.0 - "\uD83D\uDCC5 Weekly report" (run it on Fridays): emails which KAs are new, got a
  *   new version or a minor edit this week, who did it and if they synced the Doc.
@@ -103,7 +104,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.7.1';
+  const SCRIPT_VERSION = '2.7.2';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -2212,6 +2213,21 @@
   }
 
   // -- Audit flow --
+  // The Google Script answered "unknown action": say which Code.gs is live and how to check it.
+  function showOldBackend(res, what) {
+    const body = _overlayBody(); if (!body) return;
+    const live = res && res.server ? 'KA Sync ' + res.server : 'a Code.gs older than 2.4.2';
+    const check = APPS_SCRIPT_URL + '?version=1';
+    body.innerHTML = '<div class="kar-title error">' + escHtml(what) + ' stopped: Google is running ' + escHtml(live) + '</div>' +
+      '<div style="font-size:12px;color:#5B5D62;line-height:1.5">This button needs KA Sync 2.4.2 or newer. In script.google.com:' +
+      '<br>1. Left side, <b>Files</b>: there must be only <b>Code.gs</b>. Any other .gs file with its own doPost hides the new code. Delete it or empty it.' +
+      '<br>2. Line 2 of Code.gs must say <b>v2.4.2</b>. Save with Cmd + S.' +
+      '<br>3. Deploy \u2192 Manage deployments \u2192 the one starting with <b>AKfycbwYEMf5</b> \u2192 \u270F\uFE0F \u2192 Version: <b>New version</b> \u2192 Deploy.' +
+      '<br>4. Check it: <a href="' + escHtml(check) + '" target="_blank">open this link</a>. It must show <b>"server":"2.4.2"</b>.</div>' +
+      _reviewerFooter();
+    _showOverlay(); _wireReviewerLink();
+  }
+
   // -- WEEKLY REPORT (run it on Fridays): new KAs, new versions, minor edits --
   async function startWeekly() {
     if (_busy) return;
@@ -2228,9 +2244,8 @@
       try { archived = await fetchArchivedArticles(); } catch (e) { archived = null; }
       setStatus('loading', 'Comparing with last week\u2026');
       const res = await apiPost({ action: 'weekly', by: reviewer, published, archived });
-      if (!res || !res.ok) throw new Error(res && res.code === 'BAD_ACTION'
-        ? 'the Google Script is older than this script. Paste the new Code.gs and deploy a New version.'
-        : (res && res.error) || 'no answer from the Google Script');
+      if (res && res.code === 'BAD_ACTION') { showOldBackend(res, 'Weekly report'); setButtonsDisabled(false); return; }
+      if (!res || !res.ok) throw new Error((res && res.error) || 'no answer from the Google Script');
       const c = res.counts || {};
       const body = _overlayBody();
       if (body) {
