@@ -38,7 +38,7 @@ Marca los que aceptas y dale **Do selected**. Al terminar, corre la auditoría o
 ## Piezas
 
 - `apps-script/Code.gs`: el Google Script (v2.3.1). Acción `audit`, pestañas `ka_audit` y `ka_audit_log`, correo y recordatorio semanal (`setupAuditReminderTrigger`).
-- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.5.0) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
+- `tampermonkey/kaRefresh-admin.user.js`: la copia de admin del script (v2.6.0) con los botones **📋 Audit**, **⟳ Refresh outdated** (solo lo que la última auditoría marcó como desactualizado) y **⟳ Refresh all** (todos, para cuando cambie el formato). Se actualiza sola desde GitHub.
 - `tests/`: pruebas sin conexión (`node tests/apps-script.test.js`) y de punta a punta en Chromium (`node tests/audit-e2e.test.js`).
 
 ## Configuración (Script Properties del Google Script)
@@ -47,3 +47,18 @@ Marca los que aceptas y dale **Do selected**. Al terminar, corre la auditoría o
 - `AUDIT_EMAILS` (opcional): más correos para el resumen, separados por comas.
 
 Los reportes están en `AUDIT_REPORTS`, tanto en `Code.gs` como en el script de admin. Si Nichole cambia o agrega un reporte, hay que actualizar los dos.
+
+
+## Novedades 2.3.5 / admin 2.6.0
+
+- **Quién lo editó:** la auditoría guarda quién editó de último cada KA en Salesforce
+  (columna `modificado por` en `ka_audit`). El email trae la lista de KAs sin
+  sincronizar agrupada por persona, y **Fix from audit** lo muestra en cada fila.
+- **Empezar de cero:** en el editor de Apps Script, elige la función
+  `resetAuditHistory` y dale **Run**. Vacía `ka_audit` y `ka_audit_log`
+  (los encabezados se quedan). Los emails ya enviados no se tocan.
+- **✎ Update from Doc** ahora está en la barra (se quitó **Test 5**). El writer hace
+  una copia del Doc del Content Index, marca los cambios (rojo tachado = borrar,
+  verde = agregar), abre el DRAFT del KA, da **Edit** y luego **✎ Update from Doc**.
+  Si el Doc sin los cambios no coincide 100% con las 5 cajas, no toca nada.
+  Nunca guarda: el writer revisa, da **Save** y luego **Publish**.

@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.3.4)
+ * KA Sync v2 — Google Apps Script backend (v2.3.5)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,12 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.3.5 (audit)
+ *   - Who last edited each KA in Salesforce: new "modificado por" column in
+ *     ka_audit, and the email lists the outdated KAs grouped by that person.
+ *   - resetAuditHistory(): run it once from the editor to empty ka_audit and
+ *     ka_audit_log (headers stay) and start the audit history from zero.
  *
  * v2.3.4 (audit)
  *   - A KA edited in Salesforce after its last sync is "Desactualizado" even
@@ -676,7 +682,7 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
       var slug = info.urlName || row.urlName || '';
       var ka = {
         team: team, title: info.title || row.title || '', articleNumber: num,
-        recordId: row.recordId, lastModified: info.lastModified || '',
+        recordId: row.recordId, lastModified: info.lastModified || '', lastModifiedBy: info.lastModifiedBy || '',
       };
       var matches = find(pubIx, num, slug);
       var status, doc = null, notes = [];
@@ -836,7 +842,7 @@ function _fmtIso(iso) {
 
 function _writeAuditTab(ss, rows, now) {
   var header = ['estado', 'equipo', 'título', 'número KA', 'Salesforce', 'Doc',
-                'modificado en Salesforce', 'último cambio del Doc', 'nota', 'auditado'];
+                'modificado en Salesforce', 'modificado por', 'último cambio del Doc', 'nota', 'auditado'];
   var data = rows.map(function (r) {
     var ka = r.ka || {}, doc = r.doc;
     return [
@@ -844,7 +850,7 @@ function _writeAuditTab(ss, rows, now) {
       _statusInfo(r.status).label, ka.team || '', ka.title || '', ka.articleNumber ? "'" + ka.articleNumber : '',
       ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + ka.recordId + '/view' : '',
       doc ? 'https://docs.google.com/document/d/' + doc.docId + '/edit' : '',
-      _fmtIso(ka.lastModified),
+      _fmtIso(ka.lastModified), ka.lastModifiedBy || '',
       doc && doc.modifiedMs ? Utilities.formatDate(new Date(doc.modifiedMs), LOCAL_TZ, 'yyyy-MM-dd HH:mm') : '',
       r.note || '', now,
     ];
@@ -898,14 +904,17 @@ function _emailAuditSummary(now, by, result, sheetUrl) {
     var link = r.ka && r.ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + r.ka.recordId + '/view'
       : (r.doc ? 'https://docs.google.com/document/d/' + r.doc.docId + '/edit' : '');
     return '<li><b>' + _esc(_statusInfo(r.status).label) + '</b> · ' + _esc(r.ka.team) + ' · ' +
-      (link ? '<a href="' + link + '">' + _esc(r.ka.title) + '</a>' : _esc(r.ka.title)) + '</li>';
+      (link ? '<a href="' + link + '">' + _esc(r.ka.title) + '</a>' : _esc(r.ka.title)) +
+      (r.ka.lastModifiedBy ? ' <span style="color:#666">· editado por ' + _esc(r.ka.lastModifiedBy) + ' el ' + _esc(_fmtIso(r.ka.lastModified)) + '</span>' : '') + '</li>';
   }).join('');
+  var byPerson = _outdatedByPerson(result.rows);
   var html =
     '<div style="font-family:Arial,sans-serif;font-size:14px;color:#2f3033">' +
     '<h2 style="margin:0 0 6px">Auditoría del Content Index</h2>' +
     '<p style="margin:0 0 12px;color:#666">' + _esc(now) + ' · corrida por ' + _esc(by) + '</p>' +
     '<p>' + (problems ? '<b>' + problems + '</b> KAs necesitan atención.' : 'Todo está al día. ✅') + '</p>' +
     '<table style="border-collapse:collapse;margin:8px 0 14px">' + lines + '</table>' +
+    (byPerson ? '<p style="margin:0 0 4px"><b>Sin sincronizar, por quién lo editó de último en Salesforce:</b></p>' + byPerson : '') +
     (top ? '<p style="margin:0 0 4px"><b>Primeros pendientes:</b></p><ul>' + top + '</ul>' : '') +
     '<p><a href="' + sheetUrl + '">Ver la auditoría completa en el sheet</a></p></div>';
   MailApp.sendEmail({
@@ -913,6 +922,49 @@ function _emailAuditSummary(now, by, result, sheetUrl) {
     subject: 'Auditoría KAs ' + now.slice(0, 10) + (problems ? ' — ' + problems + ' pendientes' : ' — todo al día'),
     htmlBody: html,
   });
+}
+
+/**
+ * Outdated KAs (edited in Salesforce after the last sync) grouped by the
+ * person who last edited them, as HTML; '' when there are none.
+ */
+function _outdatedByPerson(rows) {
+  var groups = {}, order = [];
+  rows.forEach(function (r) {
+    if (r.status !== 'OUTDATED' || !r.ka) return;
+    var who = r.ka.lastModifiedBy || 'Sin nombre';
+    if (!groups[who]) { groups[who] = []; order.push(who); }
+    groups[who].push(r);
+  });
+  if (!order.length) return '';
+  order.sort(function (a, b) { return groups[b].length - groups[a].length || a.localeCompare(b); });
+  return '<ul>' + order.map(function (who) {
+    return '<li><b>' + _esc(who) + '</b> (' + groups[who].length + ')<ul>' + groups[who].map(function (r) {
+      var link = r.ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + r.ka.recordId + '/view' : '';
+      return '<li>' + (link ? '<a href="' + link + '">' + _esc(r.ka.title) + '</a>' : _esc(r.ka.title)) +
+        ' <span style="color:#666">· editado el ' + _esc(_fmtIso(r.ka.lastModified)) + '</span></li>';
+    }).join('') + '</ul></li>';
+  }).join('') + '</ul>';
+}
+
+/**
+ * Run ONCE from the Apps Script editor to start the audit history from zero:
+ * empties ka_audit and ka_audit_log (the header rows stay). Emails already
+ * sent are not touched.
+ */
+function resetAuditHistory() {
+  var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID);
+  var done = [];
+  [AUDIT_TAB, AUDIT_LOG_TAB].forEach(function (name) {
+    var sh = ss.getSheetByName(name);
+    if (!sh) { done.push(name + ': not there'); return; }
+    var n = sh.getLastRow() - 1;
+    // clear instead of delete: Sheets refuses to delete every non-frozen row
+    if (n > 0) sh.getRange(2, 1, n, Math.max(sh.getLastColumn(), 1)).clearContent().setBackground(null);
+    done.push(name + ': ' + Math.max(n, 0) + ' rows removed');
+  });
+  Logger.log(done.join(' | '));
+  return done.join(' | ');
 }
 
 /** Weekly reminder email (run setupAuditReminderTrigger once). */

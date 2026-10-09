@@ -164,7 +164,7 @@ const meta = (num, slug, ts) => 'KA_META:' + num + '|https://thumbtack.lightning
 function auditFixture() {
   const published = [
     { id: 'ka1', articleNumber: '000001', title: 'Ok one',       urlName: 'Ok-One',   lastModified: '2026-09-01T10:00:00.000Z' },
-    { id: 'ka2', articleNumber: '000002', title: 'Outdated',     urlName: 'Outdated', lastModified: '2026-09-20T10:00:00.000Z' },
+    { id: 'ka2', articleNumber: '000002', title: 'Outdated',     urlName: 'Outdated', lastModified: '2026-09-20T10:00:00.000Z', lastModifiedBy: 'Ana Writer' },
     { id: 'ka3', articleNumber: '000003', title: 'Wrong team',   urlName: 'Wrong',    lastModified: '2026-09-01T10:00:00.000Z' },
     { id: 'ka4', articleNumber: '000004', title: 'Missing',      urlName: 'Missing',  lastModified: '2026-09-01T10:00:00.000Z' },
     { id: 'ka5', articleNumber: '000005', title: 'Archived',     urlName: 'Arch',     lastModified: '2026-09-01T10:00:00.000Z' },
@@ -218,6 +218,11 @@ test('audit classifies every case and writes the tab, log and email', () => {
   assert.strictEqual(mails.length, 1);
   assert.strictEqual(mails[0].to, 'owner@example.com,team@example.com');
   assert.ok(/6 pendientes/.test(mails[0].subject), mails[0].subject);
+  // who last edited it in Salesforce: column in the tab + grouped in the email
+  const hdr = tab[0], out = tab.find(x => x[2] === 'Outdated');
+  assert.strictEqual(out[hdr.indexOf('modificado por')], 'Ana Writer');
+  assert.ok(/Sin sincronizar, por quién lo editó[\s\S]*<b>Ana Writer<\/b> \(1\)[\s\S]*Outdated/.test(mails[0].htmlBody), mails[0].htmlBody);
+  assert.ok(/editado por Ana Writer/.test(mails[0].htmlBody));
 });
 
 test('URL Names that differ only in case are different KAs', () => {

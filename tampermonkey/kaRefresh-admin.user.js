@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.5.0
+// @version      2.6.0
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -16,6 +16,7 @@
 // @connect      script.google.com
 // @connect      script.googleusercontent.com
 // @connect      docs.google.com
+// @connect      googleusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -75,6 +76,11 @@
  *   "Desactualizado" (ka_audit tab). "Refresh all" stays for code/format
  *   changes that need every Doc rebuilt.
  *
+ * v2.6.0 - "\u270E Update from Doc" in the bar (apply a Doc copy's red/green
+ *   changes to the open KA draft; checks the 100% match first, never saves).
+ *   "Test 5" removed. The audit also records who last edited each KA in
+ *   Salesforce (LastModifiedBy), shown in Fix from audit and the email.
+ *
  * Reviewer: asked once, remembered. Click the reviewer name in the status
  * overlay to change it. Audience: asked only when CREATING a new Doc.
  */
@@ -93,6 +99,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
+  const SCRIPT_VERSION = '2.6.0';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -801,8 +808,8 @@
     #kar-update-btn:hover:not(:disabled) { background: #008BC0; }
     #kar-new-btn { background: #2F3033; color: #fff; }
     #kar-new-btn:hover:not(:disabled) { background: #1C1D1F; }
-    #kar-batch5-btn { background: #7A7D82; color: #fff; }
-    #kar-batch5-btn:hover:not(:disabled) { background: #64676B; }
+    #kar-ufd-btn { background: #0E7490; color: #fff; }
+    #kar-ufd-btn:hover:not(:disabled) { background: #0B5E75; }
     #kar-batch-btn { background: #2DB783; color: #fff; }
     #kar-batch-btn:hover:not(:disabled) { background: #269E70; }
     #kar-outdated-btn { background: #E8912D; color: #fff; }
@@ -861,6 +868,592 @@
       background: none; border: none; color: #8A8D91; cursor: pointer; }
   `);
 
+  // ---------------------------------------------------------------------------
+  // -- UPDATE FROM DOC ---------------------------------------------------------
+  // The writer makes a copy of the KA's Content Index Doc, marks the changes
+  // (red strikethrough = delete, green = add), opens the KA DRAFT, clicks Edit
+  // and then "Update from Doc". The Doc without the changes must match the
+  // draft 100% (all 5 boxes), or nothing is touched. It never saves: the
+  // writer reviews, clicks Save, then Publish. (Built and tested in
+  // tools/ka-write-probe.user.js.)
+  // ---------------------------------------------------------------------------
+  const UFD = (() => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  function deepAll(root, sel, out) {
+    out = out || [];
+    root.querySelectorAll(sel).forEach(el => out.push(el));
+    root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) deepAll(el.shadowRoot, sel, out); });
+    return out;
+  }
+  const shown = el => { const r = el.getBoundingClientRect(); return r.width > 40 && r.height > 20; };
+  function labelOf(el) {
+    const direct = el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('label'));
+    if (direct) return direct;
+    for (let cur = el, i = 0; cur && i < 12; i++) {
+      const lab = cur.querySelector && cur.querySelector('label, .slds-form-element__label, legend');
+      if (lab && lab.innerText && lab.innerText.trim().length < 60) return lab.innerText.trim();
+      cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host);
+    }
+    return '';
+  }
+  function editors() {
+    const out = [];
+    const dialogOpen = deepAll(document, 'h1, h2, .slds-modal__title').some(h => /source code/i.test(h.innerText || '') && shown(h));
+    deepAll(document, '.CodeMirror, .cm-editor, .ace_editor, .monaco-editor').filter(shown)
+      .forEach(el => out.push({ kind: 'code editor', el, label: dialogOpen ? 'Source Code dialog' : labelOf(el), code: true }));
+    deepAll(document, 'textarea').filter(shown)
+      .forEach(el => out.push({ kind: 'textarea', el, label: dialogOpen ? 'Source Code dialog' : labelOf(el), code: dialogOpen }));
+    deepAll(document, '[contenteditable="true"]').filter(shown)
+      .forEach(el => out.push({ kind: 'rich text box', el, label: labelOf(el) }));
+    deepAll(document, 'iframe').filter(shown).forEach(f => {
+      try {
+        const d = f.contentDocument, body = d && d.body;
+        if (body && (body.isContentEditable || d.designMode === 'on')) out.push({ kind: 'rich text box (frame)', el: body, frame: f, label: labelOf(f) });
+      } catch (e) { /* other domain */ }
+    });
+    return out;
+  }
+  function uniqueFrames() {
+    const seen = new Set();
+    return editors().filter(e => e.frame && !seen.has(e.el) && seen.add(e.el));
+  }
+
+  // A plain input (text/url) in the edit form, found by its label.
+  function inputByLabel(re) {
+    const clean = t => (t || '').replace(/\s+/g, ' ').replace(/^\*\s*/, '').trim();
+    // 1. a label whose own text is the field name, then the closest box after it
+    const labels = deepAll(document, 'label, .slds-form-element__label, span, div').filter(el =>
+      el.children.length <= 2 && re.test(clean(el.innerText).replace(/\s*\(.*\)$/, '')) && shown(el));
+    for (const lab of labels) {
+      let cur = lab;
+      for (let i = 0; i < 6 && cur; i++) {
+        const box = deepAll(cur, 'textarea, input[type="text"], input[type="url"], input:not([type])').filter(shown)[0];
+        if (box) return box;
+        cur = cur.parentElement || (cur.getRootNode && cur.getRootNode().host);
+      }
+    }
+    // 2. fallback: the box's own label
+    return deepAll(document, 'input, textarea').filter(shown).find(el => re.test(clean(labelOf(el))));
+  }
+  function typeInto(el, text) {
+    el.focus();
+    if (el.select) el.select();
+    const ok = document.execCommand('insertText', false, text);
+    if (!ok || el.value !== text) {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, text);
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    }
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    el.blur();
+    return el.value === text;
+  }
+
+  async function pasteFile(doc, body, target, file) {
+    const sel = doc.defaultView.getSelection(), r = doc.createRange();
+    r.selectNodeContents(target); r.collapse(false); sel.removeAllRanges(); sel.addRange(r);
+    const dt = new DataTransfer(); dt.items.add(file);
+    body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+    for (let i = 0; i < 20; i++) {
+      await sleep(400);
+      const im = target.querySelector('img') || (target.nextElementSibling && target.nextElementSibling.querySelector && target.nextElementSibling.querySelector('img'));
+      if (im && !/^blob:/.test(im.getAttribute('src') || '')) return true;
+    }
+    return false;
+  }
+
+  // ---------- Update from Doc ----------
+  const BOX_ORDER = ['KB Content', 'Related Content', 'MC Content', 'Additional Content', 'Support Content'];
+  const boxRe = l => new RegExp(l.replace(/ /g, '.?'), 'i');
+  // The 5 content boxes in the order the Content Index Doc lists them.
+  function contentBoxes() {
+    const fr = uniqueFrames(), used = new Set();
+    return BOX_ORDER.map(l => fr.find(e => !used.has(e) && boxRe(l).test(e.label || '') && used.add(e))).filter(Boolean);
+  }
+  function gmGet(url, type) {
+    return new Promise((resolve, reject) => GM_xmlhttpRequest({
+      method: 'GET', url, responseType: type || 'text',
+      onload: r => (r.status >= 200 && r.status < 300) ? resolve(type === 'blob' ? r.response : r.responseText) : reject(new Error('HTTP ' + r.status)),
+      onerror: () => reject(new Error('network error')),
+    }));
+  }
+  function cssRules(doc) {
+    const map = {};
+    doc.querySelectorAll('style').forEach(st => (st.textContent || '').replace(/\.([\w-]+)\{([^}]*)\}/g, (m, cls, body) => { map[cls] = (map[cls] || '') + ';' + body; }));
+    return map;
+  }
+  function styleOf(el, rules) {
+    let s = el.getAttribute && (el.getAttribute('style') || '') || '';
+    if (el.classList) el.classList.forEach(c => { if (rules[c]) s += ';' + rules[c]; });
+    return s;
+  }
+  const rgb = c => { const m = String(c || '').match(/#([0-9a-f]{6})/i); if (m) return [0, 2, 4].map(i => parseInt(m[1].substr(i, 2), 16));
+    const m2 = String(c || '').match(/rgb\((\d+),\s*(\d+),\s*(\d+)/i); return m2 ? [+m2[1], +m2[2], +m2[3]] : null; };
+  const isRed = c => c && c[0] >= 170 && c[1] <= 110 && c[2] <= 110;
+  const isGreen = c => c && c[1] >= 110 && c[1] > c[0] + 40 && c[1] > c[2] + 20;
+  const BLOCK = /^(P|H[1-6]|LI|TD|TH|SUMMARY|DIV|TR|TABLE|UL|OL|DETAILS|BLOCKQUOTE)$/;
+  const LEAF_BLOCK = /^(P|H[1-6]|LI|TD|TH|SUMMARY)$/;
+  const normCh = ch => ch === '\u00A0' || ch === '\t' || ch === '\n' || ch === '\r' ? ' ' : ch === '\u2019' || ch === '\u2018' ? "'" : ch === '\u201C' || ch === '\u201D' ? '"' :
+    /[\u25B6\u25BA\u25B8\u200B\uFEFF]/.test(ch) ? '' : ch;
+  // what the Content Index Doc writes where Salesforce has a picture, video or embed
+  const META = /^(Published link|KA ID|Version|Last modified in Salesforce|Current refresh|Previous refresh):/;
+  // the Content Index leaves out "(Return to contents)" links: so does the match
+  const TOC_BACK = /^\(?\s*(table\s*of\s*contents|return\s*to\s*contents)\s*\)?$/i;
+  const TOC_BACK_INLINE = /\(\s*(table\s*of\s*contents|return\s*to\s*contents)\s*\)/gi;
+  const PLACEHOLDER = /^\s*\[(Image|Video|Embedded content)\b[^\]]*\]\s*$/;
+
+  // Doc -> tokens {ch, add, del, href, b, i, blk, tag, lvl, tr, td} (+ image tokens), with block boundaries as spaces.
+  function docTokens(html) {
+    const d = new DOMParser().parseFromString(html, 'text/html'), rules = cssRules(d);
+    let out = []; let blk = 0, blockEl = null, lvl = null, ltag = null, trN = 0;
+    const unwrap = h => { const m = String(h || '').match(/[?&]q=([^&]+)/); return m && /google\.com\/url/.test(h) ? decodeURIComponent(m[1]) : h; };
+    // list level: Google writes it in the list class (lst-kix_..-1 = second level); real nesting counts too
+    const levelOf = li => { const list = li.parentElement; const m = list && (list.className || '').match(/lst-kix_[\w]*?-(\d+)\b/);
+      let n = 0; for (let x = list && list.parentElement; x; x = x.parentElement) if (x.tagName === 'LI') n++; return (m ? +m[1] : 0) + n; };
+    const walk = (n, ctx) => {
+      if (n.nodeType === 3) {
+        for (const raw of n.data) { const ch = normCh(raw); if (ch) out.push(Object.assign({ ch, blk, tag: blockEl && blockEl.tagName, lvl, ltag }, ctx)); }
+        return;
+      }
+      if (n.nodeType !== 1 || /^(STYLE|SCRIPT|HEAD)$/.test(n.tagName)) return;
+      const s = styleOf(n, rules), c = ctx;
+      const nc = Object.assign({}, c);
+      const col = rgb((s.match(/(?:^|;)\s*color\s*:\s*([^;]+)/i) || [])[1]);
+      // green = added; red + strikethrough = deleted; any other color (like link blue) keeps what the parent said
+      if (col && isGreen(col)) { nc.add = true; nc.del = false; }
+      else if (col && isRed(col)) { nc.add = false; nc.del = /line-through/.test(s) || !!c.del; }
+      if (/font-weight\s*:\s*(700|bold)/.test(s) || /^(B|STRONG)$/.test(n.tagName)) nc.b = true;
+      if (/font-style\s*:\s*italic/.test(s) || /^(I|EM)$/.test(n.tagName)) nc.i = true;
+      if (n.tagName === 'A' && n.getAttribute('href')) nc.href = unwrap(n.getAttribute('href'));
+      if (n.tagName === 'TR') nc.tr = ++trN;
+      if (n.tagName === 'TD' || n.tagName === 'TH') nc.td = Array.prototype.indexOf.call(n.parentElement.children, n);
+      if (n.tagName === 'IMG') { out.push({ img: n.getAttribute('src'), blk, tag: blockEl && blockEl.tagName, lvl }); return; }
+      const isBlock = BLOCK.test(n.tagName);
+      if (isBlock) { out.push({ ch: ' ', sep: true }); if (LEAF_BLOCK.test(n.tagName)) { blk++; blockEl = n; lvl = n.tagName === 'LI' ? levelOf(n) : null; ltag = n.tagName === 'LI' && n.parentElement ? n.parentElement.tagName : null; } }
+      n.childNodes.forEach(k => walk(k, nc));
+      if (isBlock) out.push({ ch: ' ', sep: true });
+    };
+    walk(d.body, {});
+    const byBlk = {}, byTr = {};
+    out.forEach(t => { if (t.blk == null || t.img || t.sep) return;
+      if (!t.ch.trim()) { if (byBlk[t.blk]) byBlk[t.blk].txt += ' '; return; }
+      const b = byBlk[t.blk] || (byBlk[t.blk] = { all: true, any: false, txt: '', del: true }); if (!t.add) b.all = false; else b.any = true; if (!t.del) b.del = false; b.txt += t.ch;
+      if (t.tr) { const r = byTr[t.tr] || (byTr[t.tr] = { all: true }); if (!t.add) r.all = false; } });
+    // "[Image: ...]" lines are the Doc's stand-ins for Salesforce pictures: not text, leave them out
+    const ph = new Set(Object.keys(byBlk).filter(k => PLACEHOLDER.test(byBlk[k].txt) && !byBlk[k].any).map(Number));
+    const imgDeletes = [...ph].filter(k => byBlk[k].del).length;
+    // the Content Index page header (KA details) and the title on top are not part of the boxes
+    const h1 = out.find(t => t.tag === 'H1' && t.ch && t.ch.trim());
+    const before = h1 ? Object.keys(byBlk).filter(k => +k < h1.blk) : [];
+    const cut = h1 && before.every(k => META.test(byBlk[k].txt.trim())) ? h1.blk : -1;
+    const meta = new Set(Object.keys(byBlk).filter(k => META.test(byBlk[k].txt.trim()) && (cut < 0 || +k < cut)).map(Number));
+    let title = null;
+    if (cut >= 0) {
+      const tt = out.filter(t => t.blk === cut && !t.sep && !t.img && t.ch);
+      const join = f => tt.filter(f).map(t => t.ch).join('').replace(/\s+/g, ' ').trim();
+      title = { old: join(t => !t.add), now: join(t => !t.del), changed: tt.some(t => t.add || t.del) };
+    }
+    out = Object.assign(out.filter(t => t.sep || t.blk == null || !(ph.has(t.blk) || meta.has(t.blk) || (cut >= 0 && t.blk <= cut))), { imgDeletes, title });
+    // a block is "new" when every visible character in it is green; a table row too
+    out.forEach(t => { if (t.blk != null && byBlk[t.blk] && byBlk[t.blk].all) t.newBlock = true; if (t.tr && byTr[t.tr] && byTr[t.tr].all) t.newRow = t.tr; });
+    out.forEach(t => { if (t.img && byBlk[t.blk] && byBlk[t.blk].any) t.add = true; });
+    return out;
+  }
+  // Editor body -> chars {ch, node, off, el}; block boundaries are spaces with no node.
+  function sfTokens(body) {
+    const out = [], skip = new Map();   // text node -> Set of offsets left out
+    const skipAt = (node, i) => (skip.get(node) || skip.set(node, new Set()).get(node)).add(i);
+    body.querySelectorAll('a').forEach(a => {
+      if (!TOC_BACK.test((a.textContent || '').trim())) return;
+      a.setAttribute('data-kwp-skip', '1');
+      const pv = a.previousSibling, nx = a.nextSibling;
+      if (pv && pv.nodeType === 3) { const m = pv.data.match(/\(\s*$/); if (m) for (let i = m.index; i < pv.data.length; i++) skipAt(pv, i); }
+      if (nx && nx.nodeType === 3) { const m = nx.data.match(/^\s*\)/); if (m) for (let i = 0; i < m[0].length; i++) skipAt(nx, i); }
+    });
+    const walk = (n, el) => {
+      if (n.nodeType === 3) {
+        if (TOC_BACK.test(n.data.trim())) return;
+        let m; TOC_BACK_INLINE.lastIndex = 0;
+        while ((m = TOC_BACK_INLINE.exec(n.data))) for (let i = m.index; i < m.index + m[0].length; i++) skipAt(n, i);
+        const sk = skip.get(n);
+        for (let i = 0; i < n.data.length; i++) { if (sk && sk.has(i)) continue; const ch = normCh(n.data[i]); if (ch) out.push({ ch, node: n, off: i, el }); }
+        return;
+      }
+      if (n.nodeType !== 1 || /^(STYLE|SCRIPT)$/.test(n.tagName)) return;
+      if (n.getAttribute('data-kwp-skip')) { n.removeAttribute('data-kwp-skip'); return; }
+      const isBlock = BLOCK.test(n.tagName), leaf = LEAF_BLOCK.test(n.tagName) ? n : el;
+      if (isBlock) out.push({ ch: ' ', sep: true });
+      n.childNodes.forEach(k => walk(k, leaf));
+      if (isBlock) out.push({ ch: ' ', sep: true });
+    };
+    walk(body, null);
+    return out;
+  }
+  // collapse spaces: a space is kept only after a visible char; marks dropped ones
+  function collapse(list, keep) {
+    const out = []; let prevSpace = true;
+    list.forEach(t => { if (!keep(t)) return; if (t.ch === ' ') { if (prevSpace) return; prevSpace = true; } else prevSpace = false; out.push(t); });
+    while (out.length && out[out.length - 1].ch === ' ') out.pop();
+    return out;
+  }
+  function allBoxTokens(boxes) {
+    let all = [];
+    boxes.forEach(bx => { all.push({ ch: ' ', sep: true }); all = all.concat(sfTokens(bx.el)); });
+    return all;
+  }
+  const slug = s => String(s).toLowerCase().replace(/^[\s\d.]+/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'section';
+  const plainText = s => String(s || '').replace(/[\u00A0\s]+/g, ' ').trim().toLowerCase();
+
+  async function updateFromDoc(add, link) {
+    const boxes = contentBoxes();
+    if (!boxes.length) { add(false, 'Update from Doc', 'No content boxes on screen. Click Edit first.'); return 'stop'; }
+    const docId = (link.match(/\/d\/([A-Za-z0-9_-]{20,})/) || [])[1];
+    if (!docId) { add(false, 'Update from Doc', 'That is not a Google Doc link'); return 'retry'; }
+    let html;
+    try { html = await gmGet('https://docs.google.com/document/d/' + docId + '/export?format=html'); }
+    catch (e) { add(false, '1. Read the Doc', e.message + '. Is it shared with you and are you signed into Google?'); return 'retry'; }
+    if (/<title>[^<]*Sign in/i.test(html)) { add(false, '1. Read the Doc', 'Google asked to sign in'); return 'retry'; }
+    const toks = docTokens(html);
+    const adds = toks.filter(t => t.add && !t.img).length, dels = toks.filter(t => t.del).length, imgs = toks.filter(t => t.img && t.add).length;
+    add(adds + dels + imgs > 0, '1. Read the Doc', (adds + dels + imgs ? '' : 'NO changes found. ') + 'green: ' + adds + ' characters, red: ' + dels + ' characters, new images: ' + imgs);
+
+    // 2. Parity: the Doc without the green (and with the red as normal text) must equal Salesforce (all boxes, in order)
+    const sf = collapse(allBoxTokens(boxes), () => true);
+    const orig = collapse(toks.filter(t => !t.img), t => !t.add);
+    const a = orig.map(t => t.ch).join(''), b = sf.map(t => t.ch).join('');
+    if (a !== b) {
+      let i = 0; while (i < a.length && a[i] === b[i]) i++;
+      add(false, '2. 100% match with Salesforce', 'NO MATCH, nothing was changed. First difference at character ' + i +
+        ': Doc says "\u2026' + a.slice(Math.max(0, i - 40), i + 40) + '\u2026" but Salesforce has "\u2026' + b.slice(Math.max(0, i - 40), i + 40) + '\u2026". ' +
+        'Make a fresh copy of the Content Index Doc, or mark that change in red/green.');
+      return 'retry';
+    }
+    add(true, '2. 100% match with Salesforce', a.length + ' characters match in ' + boxes.length + ' boxes (not counting the changes)');
+
+    // 3. Plan the edits: each Doc token is placed against the Salesforce position it sits before.
+    const ops = [];   // {at, kind:'del'|'ins'|'block'|'row'|'img', ...}
+    let k = 0; const origSet = new Set(orig);
+    let pendingIns = null, pendingBlock = null, pendingRow = null;
+    const flush = () => { [pendingIns, pendingBlock, pendingRow].forEach(p => p && ops.push(p)); pendingIns = pendingBlock = pendingRow = null; };
+    for (const t of toks) {
+      if (origSet.has(t)) { flush(); if (t.del) ops.push({ at: k, kind: 'del' }); k++; continue; }
+      if (t.img && t.add) { flush(); ops.push({ at: k, kind: 'img', src: t.img, blk: t.blk }); continue; }
+      if (!t.add || t.sep) continue;
+      if (t.newRow) {
+        if (!pendingRow || pendingRow.tr !== t.newRow) { flush(); pendingRow = { at: k, kind: 'row', tr: t.newRow, cells: {} }; }
+        (pendingRow.cells[t.td] || (pendingRow.cells[t.td] = [])).push(t);
+      } else if (t.newBlock) {
+        if (pendingIns) { ops.push(pendingIns); pendingIns = null; }
+        if (!pendingBlock || pendingBlock.blk !== t.blk) { if (pendingBlock) ops.push(pendingBlock); pendingBlock = { at: k, kind: 'block', blk: t.blk, tag: t.tag, lvl: t.lvl, ltag: t.ltag, runs: [] }; }
+        pendingBlock.runs.push(t);
+      } else {
+        if (pendingBlock) { ops.push(pendingBlock); pendingBlock = null; }
+        if (!pendingIns) pendingIns = { at: k, kind: 'ins', runs: [] };
+        pendingIns.runs.push(t);
+      }
+    }
+    flush();
+    // attach new images to the new block they live in
+    ops.filter(o => o.kind === 'img').forEach(im => { const bl = ops.find(o => o.kind === 'block' && o.blk === im.blk); if (bl) { bl.img = im.src; im.done = true; } });
+
+    const fragOf = (runs, doc, anc) => {
+      anc = anc || {};
+      const f = doc.createDocumentFragment(); let i = 0;
+      const key = r => [r.href && r.href !== anc.href ? r.href : '', r.b && !anc.b ? 1 : 0, r.i && !anc.i ? 1 : 0].join('|');
+      while (i < runs.length) {
+        const r = runs[i], kk = key(r); let txt = ''; let j = i;
+        while (j < runs.length && key(runs[j]) === kk) { txt += runs[j].ch; j++; }
+        const [href, bb, ii] = kk.split('|');
+        let node = doc.createTextNode(txt);
+        if (bb === '1') { const s = doc.createElement('strong'); s.appendChild(node); node = s; }
+        if (ii === '1') { const s = doc.createElement('em'); s.appendChild(node); node = s; }
+        if (href) { const aEl = doc.createElement('a'); aEl.setAttribute('href', href); if (!/^#/.test(href)) aEl.setAttribute('target', '_blank'); aEl.appendChild(node); node = aEl; }
+        f.appendChild(node); i = j;
+      }
+      return f;
+    };
+    const real = idx => { for (let x = idx; x >= 0; x--) if (sf[x] && !sf[x].sep && sf[x].node) return sf[x]; return null; };
+    const realFwd = idx => { for (let x = idx; x < sf.length; x++) if (sf[x] && !sf[x].sep && sf[x].node) return sf[x]; return null; };
+    const pe = t => t && t.node && t.node.parentElement;
+    const boxOf = t => t && t.node && t.node.ownerDocument.body;
+
+    // 3a. deletions: whole table rows, whole blocks, or characters
+    const delIdx = new Set(ops.filter(o => o.kind === 'del').map(o => o.at));
+    const blocksAll = new Map(), rowsAll = new Map();
+    sf.forEach((t, i) => { if (!t.node) return;
+      if (t.el) { const e = blocksAll.get(t.el) || { n: 0, d: 0 }; e.n++; if (delIdx.has(i)) e.d++; blocksAll.set(t.el, e); }
+      const tr = pe(t).closest('tr'); if (tr) { const e = rowsAll.get(tr) || { n: 0, d: 0 }; e.n++; if (delIdx.has(i)) e.d++; rowsAll.set(tr, e); } });
+    let removedBlocks = 0, removedChars = 0, removedRows = 0;
+    // elements that receive new text inline must stay; table cells and dropdown titles are never removed on their own
+    const keepEls = new Set();
+    ops.filter(o => o.kind === 'ins').forEach(o => { const pr = sf[o.at - 1], nx = sf[o.at];
+      keepEls.add(pr && pr.node && (!nx || !nx.node || pr.el === nx.el) ? pr.el : (nx && nx.el)); });
+    const killRows = [...rowsAll].filter(([tr, e]) => e.n > 0 && e.d === e.n && ![...keepEls].some(el => el && tr.contains(el))).map(([tr]) => tr);
+    const inKilledRow = el => killRows.some(tr => tr.contains(el));
+    const killEls = [...blocksAll].filter(([el, e]) => e.n > 0 && e.d === e.n && !keepEls.has(el) && !/^(TD|TH|SUMMARY)$/.test(el.tagName) && !inKilledRow(el)).map(([el]) => el);
+    // character deletions, highest offset first inside each text node
+    const perNode = new Map();
+    [...delIdx].forEach(i => { const t = sf[i]; if (!t || !t.node || killEls.includes(t.el) || inKilledRow(t.node.parentElement)) return; (perNode.get(t.node) || perNode.set(t.node, []).get(t.node)).push(t.off); });
+
+    // 3b. inserts, new blocks and new rows (from the end so earlier positions stay valid)
+    const inserts = ops.filter(o => o.kind === 'ins' || o.kind === 'block' || o.kind === 'row').sort((x, y) => y.at - x.at);
+    const newEls = [], touched = new Set(boxes.map(bx => bx.el));
+    let insChars = 0, newRows = 0;
+    const groups = [];
+    inserts.forEach(o => { const g = o.kind === 'block' && groups.find(gg => gg.at === o.at && gg.kind === 'block'); if (g) g.list.push(o); else groups.push({ at: o.at, kind: o.kind, list: [o] }); });
+    const liDepth = li => { let d = -1; for (let x = li.parentElement; x && x.tagName !== 'BODY'; x = x.parentElement) if (/^(UL|OL)$/.test(x.tagName)) d++; return d; };
+    const liOf = t => t && pe(t) && pe(t).closest('li');
+    for (const g of groups) {
+      if (g.kind === 'ins') {
+        const o = g.list[0];
+        const prev = sf[o.at - 1], next = sf[o.at];
+        let node, off;
+        if (prev && prev.node && (!next || !next.node || prev.el === next.el)) { node = prev.node; off = prev.off + 1; }
+        else if (next && next.node) { node = next.node; off = next.off; }
+        else { const p2 = real(o.at - 1); node = p2.node; off = p2.off + 1; }
+        const doc = node.ownerDocument, par = node.parentElement;
+        const ancA = par.closest('a');
+        const anc = { b: !!par.closest('strong,b'), i: !!par.closest('em,i'), href: ancA ? ancA.getAttribute('href') : null };
+        const after = node.splitText(Math.min(off, node.data.length));
+        // plain text typed right after a link goes after the link, not inside it
+        if (ancA && !o.runs[0].href && !after.data.length && !after.nextSibling && ancA.lastChild === after) { anc.href = null; ancA.parentNode.insertBefore(fragOf(o.runs, doc, anc), ancA.nextSibling); }
+        else node.parentNode.insertBefore(fragOf(o.runs, doc, anc), after);
+        const offs = perNode.get(node);
+        if (offs) { const moved = offs.filter(x => x >= off).map(x => x - off); perNode.set(node, offs.filter(x => x < off)); if (moved.length) perNode.set(after, (perNode.get(after) || []).concat(moved)); }
+        insChars += o.runs.length;
+      } else if (g.kind === 'row') {
+        const o = g.list[0];
+        const pb = real(o.at - 1), nb = realFwd(o.at);
+        const pTr = pb && pe(pb).closest('tr'), nTr = nb && pe(nb).closest('tr');
+        const ref = pTr || nTr; if (!ref) continue;
+        const table = ref.closest('table');
+        const tmpl = (ref.querySelector('td') ? ref : (table.querySelector('td') || {}).parentElement) || ref;
+        const doc = ref.ownerDocument, tr = tmpl.cloneNode(false);
+        Array.from(tmpl.children).forEach((cell, ci) => { const c2 = cell.cloneNode(false); const runs = o.cells[ci];
+          if (runs) c2.appendChild(fragOf(runs, doc)); else c2.innerHTML = '<br>'; tr.appendChild(c2); });
+        if (pTr) pTr.parentNode.insertBefore(tr, pTr.nextSibling); else nTr.parentNode.insertBefore(tr, nTr);
+        newRows++;
+      } else {
+        const list = g.list.sort((x, y) => x.blk - y.blk);
+        const nb = realFwd(g.at), pb = real(g.at - 1);
+        const make = (o, doc) => { const t2 = (o.tag || 'P').toLowerCase(); const el = doc.createElement(/^(td|th|summary)$/.test(t2) ? 'p' : t2);
+          // headings carry their own style: no extra bold/italic
+          const runs = /^h\d$/.test(t2) ? o.runs.map(r => Object.assign({}, r, { b: false, i: false })) : o.runs;
+          el.appendChild(fragOf(runs, doc)); if (o.img) el.setAttribute('data-kwp-img', o.img); newEls.push(el); return el; };
+        const topOf = el => { while (el && el.parentNode && el.parentNode.tagName !== 'BODY') el = el.parentNode; return el; };
+        const inList = el => el && el.parentNode && /^(UL|OL)$/.test(el.parentNode.tagName);
+        const outerList = li => { let x = li; while (x.parentElement && /^(UL|OL|LI)$/.test(x.parentElement.tagName)) x = x.parentElement; return x; };
+        const after = (ref, el) => { ref.parentNode.insertBefore(el, ref.nextSibling); return el; };
+        // bullets at their level: next to the bullet before (anchor), or before the bullet after (nLi)
+        const placeLis = (items, anchor, nLi) => {
+          let first = true;
+          for (const o of items) {
+            const want = o.lvl == null ? null : o.lvl;
+            if (anchor) {
+              const el = make(o, anchor.ownerDocument);
+              let d = liDepth(anchor);
+              if (want != null && want > d) {
+                const sub = Array.from(anchor.children).find(c => /^(UL|OL)$/.test(c.tagName));
+                if (sub && first) sub.insertBefore(el, sub.firstChild);
+                else if (sub) sub.appendChild(el);
+                else { const nl = anchor.ownerDocument.createElement(o.ltag === 'OL' ? 'ol' : 'ul'); nl.appendChild(el); anchor.appendChild(nl); }
+              } else {
+                let a2 = anchor;
+                while (want != null && d > want && a2.parentElement.closest('li')) { a2 = a2.parentElement.closest('li'); d = liDepth(a2); }
+                after(a2, el);
+              }
+              anchor = el;
+            } else {
+              const el = make(o, nLi.ownerDocument);
+              let a2 = nLi, d = liDepth(a2);
+              while (want != null && d > want && a2.parentElement.closest('li')) { a2 = a2.parentElement.closest('li'); d = liDepth(a2); }
+              a2.parentNode.insertBefore(el, a2);
+              anchor = el;
+            }
+            first = false;
+          }
+          return anchor;
+        };
+        // split into runs of bullets / other blocks, placed one after the other
+        const segs = [];
+        list.forEach(o => { const li = (o.tag || 'P') === 'LI', l = segs[segs.length - 1]; if (l && l.li === li) l.items.push(o); else segs.push({ li, items: [o] }); });
+        let last = null;
+        segs.forEach((sg, si) => {
+          if (si > 0) {
+            if (sg.li) {
+              const ref = last.tagName === 'LI' ? outerList(last) : last;
+              const nl = after(ref, ref.ownerDocument.createElement(sg.items[0].ltag === 'OL' ? 'ol' : 'ul'));
+              const firstEl = make(sg.items[0], nl.ownerDocument); nl.appendChild(firstEl);
+              last = sg.items.length > 1 ? placeLis(sg.items.slice(1), firstEl, null) : firstEl;
+            } else {
+              let ref = last.tagName === 'LI' ? outerList(last) : last;
+              sg.items.forEach(o => { ref = after(ref, make(o, ref.ownerDocument)); });
+              last = ref;
+            }
+            return;
+          }
+          if (sg.li && (liOf(pb) || liOf(nb))) {
+            let anchor = liOf(pb);
+            const nLi = liOf(nb);
+            // the bullet before belongs to another part of the article: this is a new first bullet of the next list
+            if (anchor && nLi && topOf(anchor) !== topOf(nLi) && !anchor.closest('ul,ol').contains(nLi)) {
+              const between = anchor.closest('ul,ol') !== nLi.closest('ul,ol');
+              if (between) anchor = null;
+            }
+            if (!anchor && !nLi) anchor = liOf(pb);
+            last = placeLis(sg.items, anchor, anchor ? null : nLi);
+          } else if (!sg.li && pb && pb.el && !inList(pb.el) && !/^(TD|TH|SUMMARY)$/.test(pb.el.tagName) && pb.el.parentNode.tagName !== 'BODY' && !pe(pb).closest('table')) {
+            let ref = pb.el; sg.items.forEach(o => { ref = after(ref, make(o, ref.ownerDocument)); }); last = ref;
+          } else if (nb && nb.el && (!pb || boxOf(pb) === boxOf(nb) || !pb.el)) {
+            const top = topOf(nb.el);
+            if (sg.li) { const nl = top.ownerDocument.createElement(sg.items[0].ltag === 'OL' ? 'ol' : 'ul'); top.parentNode.insertBefore(nl, top);
+              const firstEl = make(sg.items[0], nl.ownerDocument); nl.appendChild(firstEl); last = sg.items.length > 1 ? placeLis(sg.items.slice(1), firstEl, null) : firstEl; }
+            else sg.items.forEach(o => { last = make(o, top.ownerDocument); top.parentNode.insertBefore(last, top); });
+          } else if (pb && pb.el) {
+            let ref = topOf(pb.el);
+            if (sg.li) { const nl = after(ref, ref.ownerDocument.createElement(sg.items[0].ltag === 'OL' ? 'ol' : 'ul'));
+              const firstEl = make(sg.items[0], nl.ownerDocument); nl.appendChild(firstEl); last = sg.items.length > 1 ? placeLis(sg.items.slice(1), firstEl, null) : firstEl; }
+            else { sg.items.forEach(o => { ref = after(ref, make(o, ref.ownerDocument)); }); last = ref; }
+          } else {
+            const bd = boxes[0].el;
+            if (sg.li) { const nl = bd.ownerDocument.createElement(sg.items[0].ltag === 'OL' ? 'ol' : 'ul'); bd.appendChild(nl); sg.items.forEach(o => nl.appendChild(last = make(o, bd.ownerDocument))); }
+            else sg.items.forEach(o => bd.appendChild(last = make(o, bd.ownerDocument)));
+          }
+        });
+      }
+    }
+    perNode.forEach((offs, node) => { offs.sort((x, y) => y - x).forEach(o => { node.deleteData(o, 1); removedChars++; }); });
+    killEls.forEach(el => { const parent = el.parentNode; el.remove(); removedBlocks++; if (parent && /^(UL|OL)$/.test(parent.tagName) && !parent.querySelector('li')) parent.remove(); });
+    killRows.forEach(tr => { tr.remove(); removedRows++; });
+    // new headings get an anchor; a new Contents entry that names a heading links to it
+    newEls.filter(e => /^H[1-6]$/.test(e.tagName) && !e.id).forEach(h => { h.id = slug(h.textContent); });
+    newEls.filter(e => e.tagName === 'LI' && !e.querySelector('a')).forEach(li => {
+      const list = li.parentElement; if (!list || !list.querySelector('a[href^="#"]')) return;
+      const txt = plainText(li.textContent);
+      const h = Array.from(li.ownerDocument.querySelectorAll('h1,h2,h3,h4')).find(x => plainText(x.textContent).replace(/^[\d.\s]+/, '') === txt);
+      if (!h) return; if (!h.id) h.id = slug(h.textContent);
+      const aEl = li.ownerDocument.createElement('a'); aEl.setAttribute('href', '#' + h.id);
+      while (li.firstChild) aEl.appendChild(li.firstChild); li.appendChild(aEl);
+    });
+    touched.forEach(bd => bd.dispatchEvent(new Event('input', { bubbles: true })));
+    // the title (top of the Doc)
+    if (toks.title && toks.title.changed) {
+      const ti = inputByLabel(/^title\b/i);
+      if (!ti) add(false, '3. Title', 'Title box not found. Change it by hand to: ' + toks.title.now);
+      else { const was = ti.value; add(typeInto(ti, toks.title.now), '3. Title', '"' + was + '" \u2192 "' + toks.title.now + '"' + (was.trim() !== toks.title.old ? ' (note: the Doc had "' + toks.title.old + '")' : '')); }
+    }
+    add(true, '3. Changes applied', insChars + ' characters added inline \u00B7 ' + newEls.length + ' new paragraphs/bullets/steps/headings \u00B7 ' + newRows + ' new table rows \u00B7 ' +
+      removedChars + ' characters removed \u00B7 ' + removedBlocks + ' bullets/paragraphs removed \u00B7 ' + removedRows + ' table rows removed');
+
+    // 4. New images: download from the Doc and paste them like a writer
+    let imgOk = 0, imgAll = 0;
+    for (const el of newEls.filter(e => e.getAttribute('data-kwp-img'))) {
+      imgAll++;
+      try {
+        const blob = await gmGet(el.getAttribute('data-kwp-img'), 'blob');
+        const doc = el.ownerDocument, holder = doc.createElement('p'); holder.innerHTML = '<br>'; el.parentNode.insertBefore(holder, el.nextSibling);
+        if (await pasteFile(doc, doc.body, holder, new File([blob], 'doc-image.png', { type: blob.type || 'image/png' }))) imgOk++;
+      } catch (e) { /* reported below */ }
+      el.removeAttribute('data-kwp-img');
+    }
+    const loose = ops.filter(o => o.kind === 'img' && !o.done).length;
+    if (imgAll || loose) add(imgOk === imgAll && !loose, '4. New images', imgOk + ' of ' + imgAll + ' pasted and uploaded' + (loose ? ' \u00B7 ' + loose + ' image(s) not inside a green paragraph: add them by hand' : ''));
+    if (toks.imgDeletes) add(false, '4. Images to remove', toks.imgDeletes + ' picture(s) are crossed out in red in the Doc. Delete them by hand in the box.');
+
+    // 5. Check: the boxes now equal the Doc with the red removed and the green kept
+    const want = collapse(toks.filter(t => !t.img), t => !t.del).map(t => t.ch).join('');
+    const now = collapse(allBoxTokens(boxes), () => true).map(t => t.ch).join('');
+    let i2 = 0; while (i2 < want.length && want[i2] === now[i2]) i2++;
+    add(want === now, '5. Final check', want === now ? 'The boxes now match the Doc with the changes. Review them, then click Save.' :
+      'Almost: first difference at ' + i2 + ': wanted "\u2026' + want.slice(Math.max(0, i2 - 30), i2 + 30) + '\u2026", box has "\u2026' + now.slice(Math.max(0, i2 - 30), i2 + 30) + '\u2026". Review before saving.');
+    return 'done';
+  }
+
+  // The link goes in a field inside the box: it stays open while the writer goes to the Doc and back.
+  function askLink(id, lines, note) {
+    return new Promise(resolve => {
+      render(id, lines, false);
+      const box = document.getElementById('kwp-box');
+      const w = document.createElement('div');
+      let last = ''; try { last = sessionStorage.getItem('kwp-doc-link') || ''; } catch (e) { /* private window */ }
+      w.innerHTML = '<div style="font-weight:700;margin:8px 0 4px">Update from Doc</div>' +
+        (note ? '<div style="font-size:12px;color:#C5221F;margin-bottom:4px">' + esc(note) + '</div>' : '') +
+        '<div style="font-size:12px;color:#5B5D62;margin-bottom:6px">Paste the link of your copy of the Content Index Doc (red strikethrough = delete, green = add). ' +
+        'You can go to the Doc and come back: this box stays open.</div>' +
+        '<input id="kwp-link" type="text" placeholder="https://docs.google.com/document/d/..." style="width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid #c9c9c9;border-radius:6px;font-size:12px">' +
+        '<div style="margin-top:8px"><button class="kwp-b kwp-grey" id="kwp-paste">Paste copied link</button><button class="kwp-b" id="kwp-go">Apply changes</button>' +
+        '<button class="kwp-b kwp-grey" id="kwp-cancel">Close</button></div>';
+      box.appendChild(w);
+      const inp = w.querySelector('#kwp-link'); inp.value = last;
+      ['keydown', 'keyup', 'keypress'].forEach(ev => inp.addEventListener(ev, e => e.stopPropagation()));
+      w.querySelector('#kwp-paste').onclick = async () => {
+        try { inp.value = (await navigator.clipboard.readText()).trim(); } catch (e) { inp.focus(); inp.placeholder = 'Click here and press Cmd+V'; }
+      };
+      w.querySelector('#kwp-go').onclick = () => {
+        const v = inp.value.trim();
+        if (!/\/d\/[A-Za-z0-9_-]{20,}/.test(v)) { inp.style.borderColor = '#C5221F'; inp.placeholder = 'Paste a Google Doc link first'; return; }
+        try { sessionStorage.setItem('kwp-doc-link', v); } catch (e) { /* private window */ }
+        w.remove(); render(id, lines, true); resolve(v);
+      };
+      w.querySelector('#kwp-cancel').onclick = () => { w.remove(); resolve(null); };
+    });
+  }
+
+
+    GM_addStyle(`
+      #kwp-box { position: fixed; top: 110px; left: 20px; z-index: 2147483647; width: 380px;
+        background: #fff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,.16);
+        padding: 14px 16px; font: 13px/1.5 -apple-system, sans-serif; color: #2F3033;
+        max-height: calc(100vh - 130px); overflow-y: auto; }
+      #kwp-box .ok { color: #1E8E3E; } #kwp-box .no { color: #C5221F; }
+      .kwp-b { padding: 6px 12px; font-size: 12px; font-weight: 600; border: none; border-radius: 100px;
+        background: #0E7490; color: #fff; cursor: pointer; margin-right: 6px; }
+      .kwp-grey { background: #8A8D91; }
+    `);
+    function render(id, lines, running, finished) {
+      let box = document.getElementById('kwp-box');
+      if (!box) { box = document.createElement('div'); box.id = 'kwp-box'; document.body.appendChild(box); }
+      box.innerHTML = '<div style="font-weight:700;margin-bottom:6px">\u270E Update from Doc' + (running ? ' \u00B7 working\u2026' : '') + '</div>' +
+        (finished ? '<div style="margin-bottom:8px"><button class="kwp-b" id="kwp-copy">Copy results</button><button class="kwp-b kwp-grey" id="kwp-close">Close</button></div>' : '') +
+        lines.map(l => '<div><b class="' + (l.ok ? 'ok' : 'no') + '">' + (l.ok ? '\u2713' : '\u2717') + '</b> <b>' + esc(l.label) + '</b>' +
+          (l.detail ? '<div style="font-size:12px;color:#5B5D62;margin-left:16px">' + esc(l.detail) + '</div>' : '') + '</div>').join('');
+      if (finished) {
+        const text = 'Update from Doc (KA Refresh ' + SCRIPT_VERSION + ') - record ' + id + '\n' + lines.map(l => (l.ok ? 'OK   ' : 'FAIL ') + l.label + (l.detail ? ' - ' + l.detail : '')).join('\n');
+        document.getElementById('kwp-copy').onclick = async () => {
+          try { await navigator.clipboard.writeText(text); document.getElementById('kwp-copy').textContent = 'Copied \u2713'; }
+          catch (e) { window.prompt('Copy this:', text); }
+        };
+        document.getElementById('kwp-close').onclick = () => box.remove();
+      }
+    }
+    let running = false;
+    async function run() {
+      if (running) return;
+      const id = (location.href.match(/\/Knowledge__kav\/([a-zA-Z0-9]{15,18})/) || [])[1] || '';
+      const lines = [];
+      const add = (ok, label, detail) => { lines.push({ ok, label, detail: detail || '' }); render(id, lines, true); };
+      running = true;
+      try {
+        if (!id) add(false, 'Open the KA first', 'Open the DRAFT of the KA in Salesforce.');
+        else if (!contentBoxes().length) add(false, 'Click Edit first', 'Open the DRAFT of the KA, click Edit (pencil), wait for the content boxes to load, then click \u270E Update from Doc again.');
+        else {
+          const base = lines.length; let note = '';
+          for (;;) {
+            const link = await askLink(id, lines, note);
+            if (!link) { add(true, 'Closed', 'Nothing was changed.'); break; }
+            lines.length = base;
+            if (await updateFromDoc(add, link) !== 'retry') break;
+            note = 'Nothing was changed. Fix the Doc (or make a fresh copy) and click Apply changes again.';
+          }
+        }
+      } catch (e) { add(false, 'Error', String(e && e.message || e)); }
+      running = false;
+      render(id, lines, false, true);
+    }
+    return { run };
+  })();
+
   function injectUI() {
     if (document.getElementById('kar-bar')) return;
     const bar = document.createElement('div');
@@ -868,11 +1461,11 @@
     bar.innerHTML =
       '<button class="kar-main-btn" id="kar-update-btn">\u2191 Update</button>' +
       '<button class="kar-main-btn" id="kar-new-btn">+ New</button>' +
-      '<button class="kar-main-btn" id="kar-batch5-btn">Test 5</button>' +
       '<button class="kar-main-btn" id="kar-outdated-btn">\u27F3 Refresh outdated</button>' +
       '<button class="kar-main-btn" id="kar-batch-btn">\u27F3 Refresh all</button>' +
       '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>' +
-      '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>';
+      '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>' +
+      '<button class="kar-main-btn" id="kar-ufd-btn">\u270E Update from Doc</button>';
     document.body.appendChild(bar);
     const overlay = document.createElement('div');
     overlay.id = 'kar-overlay';
@@ -880,7 +1473,7 @@
     document.body.appendChild(overlay);
     document.getElementById('kar-update-btn').addEventListener('click', () => runIntent('update'));
     document.getElementById('kar-new-btn').addEventListener('click', () => runIntent('new'));
-    document.getElementById('kar-batch5-btn').addEventListener('click', () => startBatch(5));
+    document.getElementById('kar-ufd-btn').addEventListener('click', () => UFD.run());
     document.getElementById('kar-batch-btn').addEventListener('click', () => startBatch(0));
     document.getElementById('kar-outdated-btn').addEventListener('click', () => startBatch(0, 'outdated'));
     document.getElementById('kar-audit-btn').addEventListener('click', () => startAudit());
@@ -888,7 +1481,7 @@
   }
 
   function setButtonsDisabled(disabled) {
-    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-batch5-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn', 'kar-fix-btn']) {
+    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn', 'kar-fix-btn']) {
       const b = document.getElementById(id);
       if (b) b.disabled = disabled;
     }
@@ -1146,7 +1739,7 @@
             const docId = (doc.match(/\/d\/([A-Za-z0-9_-]{20,})/) || [])[1] || '';
             if ((action === 'create' || action === 'update') && !recordId) action = 'manual';
             if (action === 'archive' && !docId) action = 'manual';
-            return { estado, team: v('equipo'), title: v('título'), url: sf, recordId, docId, action };
+            return { estado, team: v('equipo'), title: v('título'), url: sf, recordId, docId, action, by: v('modificado por') };
           }).filter((x) => x.estado && x.estado !== 'OK');
           resolve(out);
         },
@@ -1172,7 +1765,7 @@
         return '<label class="' + (can ? '' : 'off') + '"><input type="checkbox" data-i="' + i + '"' +
           (can ? (x.action === 'archive' ? '' : ' checked') : ' disabled') + '>' +
           '<span style="flex:1;min-width:0"><span class="kar-act ' + x.action + '">' + ACT_LABEL[x.action] + '</span> ' +
-          escHtml(x.title) + '<br><span style="font-size:11px;color:#8A8D93">' + escHtml(x.team) + ' · ' + escHtml(x.estado) + '</span></span></label>';
+          escHtml(x.title) + '<br><span style="font-size:11px;color:#8A8D93">' + escHtml(x.team) + ' · ' + escHtml(x.estado) + (x.by ? ' · last edit: ' + escHtml(x.by) : '') + '</span></span></label>';
       }).join('') + '</div>' +
       '<button class="kar-mini-btn blue" id="kar-fix-go">Do selected</button> ' +
       '<button class="kar-mini-btn warn" id="kar-fix-cancel">Cancel</button>';
@@ -1349,7 +1942,16 @@
     try { return JSON.parse(text); } catch (e) { throw new Error('Salesforce did not answer with data (signed out?)'); }
   }
 
-  // Every published KA with number, URL Name and exact last-modified time.
+  // The "LastModifiedBy" lookup: Salesforce sends the name as displayValue
+  // (or inside value.fields.Name).
+  function whoOf(fld) {
+    if (!fld) return '';
+    if (fld.displayValue) return String(fld.displayValue);
+    const n = fld.value && fld.value.fields && fld.value.fields.Name;
+    return n && n.value ? String(n.value) : '';
+  }
+
+  // Every published KA with number, URL Name, exact last-modified time and who did it.
   async function fetchPublishedArticles() {
     const base = '/services/data/v59.0/ui-api';
     // Two ways to list the views; in Thumbtack's org /list-info answers 404 and
@@ -1368,19 +1970,27 @@
     if (!views.length) throw new Error('Could not read the Knowledge list views' + (lastErr ? ' (' + lastErr.message + ')' : ''));
     const view = views.find(v => /^published articles$/i.test(v.label.trim())) || views.find(v => /publish/i.test(v.label));
     if (!view) throw new Error('The "Published Articles" list view was not found');
-    const fields = ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate']
-      .map(f => 'Knowledge__kav.' + f).join(',');
+    const baseFields = ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate'];
+    let fields = baseFields.concat('LastModifiedBy.Name').map(f => 'Knowledge__kav.' + f).join(',');
     const rows = [];
     let pageToken = null;
     for (let page = 0; page < 25; page++) {
-      const json = await uiApiGet(base + '/list-records/Knowledge__kav/' + encodeURIComponent(view.apiName) +
+      const listUrl = () => base + '/list-records/Knowledge__kav/' + encodeURIComponent(view.apiName) +
         '?pageSize=2000&optionalFields=' + encodeURIComponent(fields) +
-        (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : ''));
+        (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+      let json;
+      try { json = await uiApiGet(listUrl()); }
+      catch (e) {
+        // if Salesforce refuses the editor's name, the audit still runs without it
+        if (page > 0 || /LastModifiedBy/.test(fields) === false) throw e;
+        fields = baseFields.map(f => 'Knowledge__kav.' + f).join(',');
+        json = await uiApiGet(listUrl());
+      }
       for (const rec of json.records || []) {
         const f = rec.fields || {};
         const v = (k) => (f[k] && f[k].value != null ? f[k].value : '');
         rows.push({ id: rec.id, articleNumber: v('ArticleNumber'), title: v('Title'), urlName: v('UrlName'),
-                    version: v('VersionNumber'), lastModified: v('LastModifiedDate') });
+                    version: v('VersionNumber'), lastModified: v('LastModifiedDate'), lastModifiedBy: whoOf(f.LastModifiedBy) });
       }
       pageToken = json.nextPageToken;
       if (!pageToken) break;
