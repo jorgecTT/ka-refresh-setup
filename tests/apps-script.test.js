@@ -203,26 +203,32 @@ test('audit classifies every case and writes the tab, log and email', () => {
   const tab = sheets.ka_audit.data();
   assert.strictEqual(tab.length, 1 + 9);
   const byTitle = Object.fromEntries(tab.slice(1).map(x => [x[2], x[0]]));
-  assert.strictEqual(byTitle['Missing'], 'En Salesforce sin Doc');
-  assert.strictEqual(byTitle['Archived'], 'Archivado por error');
-  assert.strictEqual(byTitle['Dup'], 'Docs duplicados');
-  assert.strictEqual(byTitle['Outdated'], 'Desactualizado');
+  assert.strictEqual(byTitle['Missing'], 'In Salesforce, no Doc');
+  assert.strictEqual(byTitle['Archived'], 'Archived by mistake');
+  assert.strictEqual(byTitle['Dup'], 'Duplicate Docs');
+  assert.strictEqual(byTitle['Outdated'], 'Outdated');
   assert.strictEqual(byTitle['Wrong team'], 'OK', '"Sales" is the old name of GTM, so it is not a wrong team');
   assert.strictEqual(byTitle['Slug only'], 'OK', 'matched by URL Name when the Doc has no KA number');
-  assert.strictEqual(byTitle['Gone'], 'Doc de más (no está en reportes)');
-  assert.strictEqual(byTitle['No meta'], 'Doc sin datos del KA');
-  assert.strictEqual(tab[1][0], 'En Salesforce sin Doc', 'most urgent first');
+  assert.strictEqual(byTitle['Gone'], 'Extra Doc (not in any report)');
+  assert.strictEqual(byTitle['No meta'], 'Doc missing KA info');
+  assert.strictEqual(tab[1][0], 'In Salesforce, no Doc', 'most urgent first');
   assert.ok(tab[1][4].endsWith('/lightning/r/Knowledge__kav/ka4/view'));
 
   assert.strictEqual(sheets.ka_audit_log.data().length, 2);
   assert.strictEqual(mails.length, 1);
   assert.strictEqual(mails[0].to, 'owner@example.com,team@example.com');
-  assert.ok(/6 pendientes/.test(mails[0].subject), mails[0].subject);
+  assert.ok(/6 to do/.test(mails[0].subject), mails[0].subject);
   // who last edited it in Salesforce: column in the tab + grouped in the email
   const hdr = tab[0], out = tab.find(x => x[2] === 'Outdated');
-  assert.strictEqual(out[hdr.indexOf('modificado por')], 'Ana Writer');
-  assert.ok(/Sin sincronizar, por quién lo editó[\s\S]*<b>Ana Writer<\/b> \(1\)[\s\S]*Outdated/.test(mails[0].htmlBody), mails[0].htmlBody);
-  assert.ok(/editado por Ana Writer/.test(mails[0].htmlBody));
+  assert.strictEqual(out[hdr.indexOf('modified by')], 'Ana Writer');
+  assert.ok(/Not synced yet, by who last edited it[\s\S]*<b>Ana Writer<\/b> \(1\)[\s\S]*Outdated/.test(mails[0].htmlBody), mails[0].htmlBody);
+  assert.ok(/last edited by Ana Writer/.test(mails[0].htmlBody));
+});
+
+test('KA titles come back to plain text', () => {
+  const { g } = loadBackend();
+  assert.strictEqual(g._plainTitle('Thumbtack&#39;s Quality Commitment (Pro)'), "Thumbtack's Quality Commitment (Pro)");
+  assert.strictEqual(g._plainTitle('Leads &amp; quotes &quot;new&quot;'), 'Leads & quotes "new"');
 });
 
 test('URL Names that differ only in case are different KAs', () => {
@@ -270,12 +276,12 @@ test('outdated: edited after the last sync is outdated even with the same versio
   const r = post(g, { secret: 's', action: 'audit', reports, published, by: 'J' });
   assert.ok(r.ok, JSON.stringify(r));
   const tab = Object.fromEntries(sheets.ka_audit.data().slice(1).map(x => [x[2], x]));
-  assert.strictEqual(tab['Same version'][0], 'Desactualizado', 'minor edit published without a new version');
-  assert.ok(/misma versión v7, cambio menor/.test(tab['Same version'][8]), tab['Same version'][8]);
-  assert.strictEqual(tab['New version'][0], 'Desactualizado');
-  assert.ok(/Doc en v6, Salesforce en v8/.test(tab['New version'][8]));
+  assert.strictEqual(tab['Same version'][0], 'Outdated', 'minor edit published without a new version');
+  assert.ok(/same version v7, minor edit/.test(tab['Same version'][9]), tab['Same version'][9]);
+  assert.strictEqual(tab['New version'][0], 'Outdated');
+  assert.ok(/Doc is v6, Salesforce is v8/.test(tab['New version'][9]));
   assert.strictEqual(tab['Minutes'][0], 'OK', '5 minutes is inside the tolerance');
-  assert.strictEqual(tab['No header'][0], 'Desactualizado', 'no header version: keep it outdated');
+  assert.strictEqual(tab['No header'][0], 'Outdated', 'no header version: keep it outdated');
   assert.strictEqual(tab['Same version'][3], "'000201", 'number kept as text');
 });
 
@@ -285,7 +291,7 @@ test('audit flags a real wrong team', () => {
   const { g, sheets } = loadBackend({ files: fx.files, props: { SHARED_SECRET: 's' } });
   post(g, { secret: 's', action: 'audit', reports: fx.reports, published: fx.published, by: 'J' });
   const row = sheets.ka_audit.data().find(x => x[2] === 'Ok one');
-  assert.strictEqual(row[0], 'Equipo distinto');
+  assert.strictEqual(row[0], 'Different team');
 });
 
 test('audit refuses an incomplete report', () => {

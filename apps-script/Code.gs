@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.3.5)
+ * KA Sync v2 — Google Apps Script backend (v2.3.6)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,11 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.3.6 (audit)
+ *   - The audit is in English: the email, the reminder and the ka_audit /
+ *     ka_audit_log tabs (statuses, column names, notes).
+ *   - KA titles come back to plain text ("Thumbtack's", not "Thumbtack&#39;s").
  *
  * v2.3.5 (audit)
  *   - Who last edited each KA in Salesforce: new "modificado por" column in
@@ -570,13 +575,13 @@ var OUTDATED_TOLERANCE_MS = 10 * 60 * 1000;
 
 // Most urgent first. Each KA gets one row with its most urgent status.
 var AUDIT_STATUSES = [
-  { key: 'MISSING_DOC',         label: 'En Salesforce sin Doc',          color: '#f4c7c3' },
-  { key: 'ARCHIVED_BUT_ACTIVE', label: 'Archivado por error',            color: '#f4c7c3' },
-  { key: 'DUPLICATE_DOCS',      label: 'Docs duplicados',                color: '#fce8b2' },
-  { key: 'OUTDATED',            label: 'Desactualizado',                 color: '#fce8b2' },
-  { key: 'WRONG_TEAM',          label: 'Equipo distinto',                color: '#fff2cc' },
-  { key: 'EXTRA_DOC',           label: 'Doc de más (no está en reportes)', color: '#fff2cc' },
-  { key: 'NO_META',             label: 'Doc sin datos del KA',           color: '#e8eaed' },
+  { key: 'MISSING_DOC',         label: 'In Salesforce, no Doc',          color: '#f4c7c3' },
+  { key: 'ARCHIVED_BUT_ACTIVE', label: 'Archived by mistake',            color: '#f4c7c3' },
+  { key: 'DUPLICATE_DOCS',      label: 'Duplicate Docs',                 color: '#fce8b2' },
+  { key: 'OUTDATED',            label: 'Outdated',                       color: '#fce8b2' },
+  { key: 'WRONG_TEAM',          label: 'Different team',                 color: '#fff2cc' },
+  { key: 'EXTRA_DOC',           label: 'Extra Doc (not in any report)', color: '#fff2cc' },
+  { key: 'NO_META',             label: 'Doc missing KA info',            color: '#e8eaed' },
   { key: 'OK',                  label: 'OK',                             color: '#d9ead3' },
 ];
 
@@ -681,7 +686,7 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
       var num = info.articleNumber || '';
       var slug = info.urlName || row.urlName || '';
       var ka = {
-        team: team, title: info.title || row.title || '', articleNumber: num,
+        team: team, title: _plainTitle(info.title || row.title || ''), articleNumber: num,
         recordId: row.recordId, lastModified: info.lastModified || '', lastModifiedBy: info.lastModifiedBy || '',
       };
       var matches = find(pubIx, num, slug);
@@ -704,15 +709,15 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
           var sfV = info.version != null ? String(info.version) : '';
           found.push('OUTDATED');
           notes.push(docV && sfV && docV === sfV
-            ? 'Se editó en Salesforce después del último sync (misma versión v' + sfV + ', cambio menor)'
-            : docV && sfV ? 'Doc en v' + docV + ', Salesforce en v' + sfV
-                          : 'Cambió en Salesforce después del último sync');
+            ? 'Edited in Salesforce after the last sync (same version v' + sfV + ', minor edit)'
+            : docV && sfV ? 'Doc is v' + docV + ', Salesforce is v' + sfV
+                          : 'Changed in Salesforce after the last sync');
         }
         if (doc.team && doc.team !== team) {
           found.push('WRONG_TEAM');
-          notes.push('El Doc dice "' + doc.team + '", el reporte dice "' + team + '"');
+          notes.push('The Doc says "' + doc.team + '", the report says "' + team + '"');
         }
-        if (!info.id) notes.push('No apareció en "Published Articles"');
+        if (!info.id) notes.push('Not found in "Published Articles"');
         found.sort(function (a, b) { return _statusRank(a) - _statusRank(b); });
         status = found.length ? found[0] : 'OK';
       } else {
@@ -720,10 +725,10 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
         if (arc.length) {
           status = 'ARCHIVED_BUT_ACTIVE';
           doc = arc[0];
-          notes.push('Está en la carpeta de archivados pero sigue publicado en el reporte');
+          notes.push('In the Archived folder, but still in a report');
         } else {
           status = 'MISSING_DOC';
-          notes.push('Nadie le dio "New"');
+          notes.push('Nobody clicked "+ New" yet');
         }
       }
       rows.push({ status: status, ka: ka, doc: doc, note: notes.join('; ') });
@@ -737,7 +742,7 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
     rows.push({
       status: st, doc: d,
       ka: { team: d.team, title: d.title.split(' - internal')[0], articleNumber: d.kaId, recordId: '', lastModified: '' },
-      note: st === 'NO_META' ? 'Correr "Update" en su KA para que guarde sus datos' : 'Ya no está en ningún reporte: ¿archivarlo?',
+      note: st === 'NO_META' ? 'Click "Update" on its KA so it saves its info' : 'Not in any report anymore: archive it?',
     });
   }
 
@@ -834,6 +839,12 @@ function _docHeaderVersion(docId) {
   }
 }
 
+// Salesforce can send titles HTML-escaped ("Thumbtack&#39;s"): back to plain text.
+function _plainTitle(t) {
+  return String(t || '').replace(/&#(\d+);/g, function (m, n) { return String.fromCharCode(+n); })
+    .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
 function _fmtIso(iso) {
   if (!iso) return '';
   var ms = Date.parse(iso);
@@ -841,8 +852,8 @@ function _fmtIso(iso) {
 }
 
 function _writeAuditTab(ss, rows, now) {
-  var header = ['estado', 'equipo', 'título', 'número KA', 'Salesforce', 'Doc',
-                'modificado en Salesforce', 'modificado por', 'último cambio del Doc', 'nota', 'auditado'];
+  var header = ['status', 'team', 'title', 'KA number', 'Salesforce', 'Doc',
+                'modified in Salesforce', 'modified by', 'last Doc change', 'note', 'audited'];
   var data = rows.map(function (r) {
     var ka = r.ka || {}, doc = r.doc;
     return [
@@ -869,7 +880,7 @@ function _appendAuditLog(ss, now, by, req, result, pubDocCount) {
   var keys = AUDIT_STATUSES.map(function (s) { return s.key; });
   if (!sh) {
     sh = ss.insertSheet(AUDIT_LOG_TAB);
-    sh.appendRow(['auditado', 'por', 'KAs en reportes', 'Docs publicados'].concat(keys));
+    sh.appendRow(['audited', 'by', 'KAs in reports', 'published Docs'].concat(keys));
     sh.setFrozenRows(1);
     sh.getRange(1, 1, 1, 4 + keys.length).setFontWeight('bold');
   }
@@ -905,21 +916,21 @@ function _emailAuditSummary(now, by, result, sheetUrl) {
       : (r.doc ? 'https://docs.google.com/document/d/' + r.doc.docId + '/edit' : '');
     return '<li><b>' + _esc(_statusInfo(r.status).label) + '</b> · ' + _esc(r.ka.team) + ' · ' +
       (link ? '<a href="' + link + '">' + _esc(r.ka.title) + '</a>' : _esc(r.ka.title)) +
-      (r.ka.lastModifiedBy ? ' <span style="color:#666">· editado por ' + _esc(r.ka.lastModifiedBy) + ' el ' + _esc(_fmtIso(r.ka.lastModified)) + '</span>' : '') + '</li>';
+      (r.ka.lastModifiedBy ? ' <span style="color:#666">· last edited by ' + _esc(r.ka.lastModifiedBy) + ' on ' + _esc(_fmtIso(r.ka.lastModified)) + '</span>' : '') + '</li>';
   }).join('');
   var byPerson = _outdatedByPerson(result.rows);
   var html =
     '<div style="font-family:Arial,sans-serif;font-size:14px;color:#2f3033">' +
-    '<h2 style="margin:0 0 6px">Auditoría del Content Index</h2>' +
-    '<p style="margin:0 0 12px;color:#666">' + _esc(now) + ' · corrida por ' + _esc(by) + '</p>' +
-    '<p>' + (problems ? '<b>' + problems + '</b> KAs necesitan atención.' : 'Todo está al día. ✅') + '</p>' +
+    '<h2 style="margin:0 0 6px">Content Index audit</h2>' +
+    '<p style="margin:0 0 12px;color:#666">' + _esc(now) + ' · run by ' + _esc(by) + '</p>' +
+    '<p>' + (problems ? '<b>' + problems + '</b> KA' + (problems === 1 ? ' needs' : 's need') + ' attention.' : 'Everything is up to date. ✅') + '</p>' +
     '<table style="border-collapse:collapse;margin:8px 0 14px">' + lines + '</table>' +
-    (byPerson ? '<p style="margin:0 0 4px"><b>Sin sincronizar, por quién lo editó de último en Salesforce:</b></p>' + byPerson : '') +
-    (top ? '<p style="margin:0 0 4px"><b>Primeros pendientes:</b></p><ul>' + top + '</ul>' : '') +
-    '<p><a href="' + sheetUrl + '">Ver la auditoría completa en el sheet</a></p></div>';
+    (byPerson ? '<p style="margin:0 0 4px"><b>Not synced yet, by who last edited it in Salesforce:</b></p>' + byPerson : '') +
+    (top ? '<p style="margin:0 0 4px"><b>To do:</b></p><ul>' + top + '</ul>' : '') +
+    '<p><a href="' + sheetUrl + '">See the full audit in the sheet</a></p></div>';
   MailApp.sendEmail({
     to: to.join(','),
-    subject: 'Auditoría KAs ' + now.slice(0, 10) + (problems ? ' — ' + problems + ' pendientes' : ' — todo al día'),
+    subject: 'KA audit ' + now.slice(0, 10) + (problems ? ' — ' + problems + ' to do' : ' — all up to date'),
     htmlBody: html,
   });
 }
@@ -932,7 +943,7 @@ function _outdatedByPerson(rows) {
   var groups = {}, order = [];
   rows.forEach(function (r) {
     if (r.status !== 'OUTDATED' || !r.ka) return;
-    var who = r.ka.lastModifiedBy || 'Sin nombre';
+    var who = r.ka.lastModifiedBy || 'No name';
     if (!groups[who]) { groups[who] = []; order.push(who); }
     groups[who].push(r);
   });
@@ -942,7 +953,7 @@ function _outdatedByPerson(rows) {
     return '<li><b>' + _esc(who) + '</b> (' + groups[who].length + ')<ul>' + groups[who].map(function (r) {
       var link = r.ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + r.ka.recordId + '/view' : '';
       return '<li>' + (link ? '<a href="' + link + '">' + _esc(r.ka.title) + '</a>' : _esc(r.ka.title)) +
-        ' <span style="color:#666">· editado el ' + _esc(_fmtIso(r.ka.lastModified)) + '</span></li>';
+        ' <span style="color:#666">· edited on ' + _esc(_fmtIso(r.ka.lastModified)) + '</span></li>';
     }).join('') + '</ul></li>';
   }).join('') + '</ul>';
 }
@@ -981,15 +992,15 @@ function sendAuditReminder() {
   }).join('');
   MailApp.sendEmail({
     to: to.join(','),
-    subject: 'Recordatorio: auditoría semanal de KAs',
+    subject: 'Reminder: weekly KA audit',
     htmlBody:
       '<div style="font-family:Arial,sans-serif;font-size:14px;color:#2f3033">' +
-      '<p>Hora de la auditoría semanal del Content Index.</p>' +
-      '<ol><li>Abre cualquier KA en Salesforce.</li>' +
-      '<li>Dale clic al botón <b>📋 Audit</b> (abajo a la derecha).</li>' +
-      '<li>Deja la pestaña abierta mientras pasa por los 3 reportes (1–2 min).</li></ol>' +
-      '<p>Última auditoría: ' + _esc(last || 'ninguna todavía') + '</p>' +
-      '<p>Reportes:</p><ul>' + links + '</ul></div>',
+      '<p>Time for the weekly Content Index audit.</p>' +
+      '<ol><li>Open any KA in Salesforce.</li>' +
+      '<li>Click the <b>📋 Audit</b> button (bottom right).</li>' +
+      '<li>Keep the tab open while it goes through the 3 reports (1–2 min).</li></ol>' +
+      '<p>Last audit: ' + _esc(last || 'none yet') + '</p>' +
+      '<p>Reports:</p><ul>' + links + '</ul></div>',
   });
 }
 

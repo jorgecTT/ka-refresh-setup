@@ -52,7 +52,7 @@ Los reportes están en `AUDIT_REPORTS`, tanto en `Code.gs` como en el script de 
 ## Novedades 2.3.5 / admin 2.6.0
 
 - **Quién lo editó:** la auditoría guarda quién editó de último cada KA en Salesforce
-  (columna `modificado por` en `ka_audit`). El email trae la lista de KAs sin
+  (columna `modified by` en `ka_audit`; desde 2.3.6 el audit, el email y las pestañas están en inglés). El email trae la lista de KAs sin
   sincronizar agrupada por persona, y **Fix from audit** lo muestra en cada fila.
 - **Empezar de cero:** en el editor de Apps Script, elige la función
   `resetAuditHistory` y dale **Run**. Vacía `ka_audit` y `ka_audit_log`

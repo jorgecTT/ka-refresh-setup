@@ -19,12 +19,12 @@ const KAS = {
 const DOC = 'https://docs.google.com/document/d/1YVAvTzKSBcq5sMy82q31hG0C_BOAwutpnKRdSXN88zM/edit';
 const rec = id => SF + '/lightning/r/Knowledge__kav/' + id + '/view';
 const AUDIT_CSV = [
-  '"estado","equipo","título","número KA","Salesforce","Doc","modificado en Salesforce","último cambio del Doc","nota","auditado"',
-  `"En Salesforce sin Doc","Trust & Safety","Pro reports","000008319","${rec('ka2Vx0000000000AAA')}","","","","",""`,
-  `"Desactualizado","Support Ops","Leads (Pro)","000007636","${rec('ka2Vx0000000000BBB')}","https://docs.google.com/document/d/1aaaaaaaaaaaaaaaaaaaaaaaaaaaa/edit","","","",""`,
-  `"Doc de más (no está en reportes)","Trust & Safety","Incident mediation","000008310","","${DOC}","","","",""`,
-  `"Docs duplicados","GTM","Two docs","000009999","${rec('ka2Vx0000000000CCC')}","","","","",""`,
-  `"OK","GTM","Already fine","000001111","${rec('ka2Vx0000000000CCC')}","","","","",""`,
+  '"status","team","title","KA number","Salesforce","Doc","modified in Salesforce","modified by","last Doc change","note","audited"',
+  `"In Salesforce, no Doc","Trust & Safety","Pro reports","000008319","${rec('ka2Vx0000000000AAA')}","","","Ana Writer","","",""`,
+  `"Outdated","Support Ops","Leads (Pro)","000007636","${rec('ka2Vx0000000000BBB')}","https://docs.google.com/document/d/1aaaaaaaaaaaaaaaaaaaaaaaaaaaa/edit","","","","",""`,
+  `"Extra Doc (not in any report)","Trust & Safety","Incident mediation","000008310","","${DOC}","","","","",""`,
+  `"Duplicate Docs","GTM","Two docs","000009999","${rec('ka2Vx0000000000CCC')}","","","","","",""`,
+  `"OK","GTM","Already fine","000001111","${rec('ka2Vx0000000000CCC')}","","","","","",""`,
 ].join('\n');
 
 // Just enough of a Lightning record page for the script's field readers.
@@ -79,6 +79,7 @@ function kaPage(id) {
   const list = await page.$$eval('.kar-fix-list label', ls => ls.map(l => [l.innerText.replace(/\s+/g, ' ').trim(), l.querySelector('input').checked, l.querySelector('input').disabled]));
   console.log(list);
   assert.strictEqual(list.length, 4, 'OK rows are not listed');
+  assert.ok(/last edit: Ana Writer/.test(list[0][0]), 'shows who last edited it');
   assert.deepStrictEqual(list.map(x => [x[1], x[2]]), [[true, false], [true, false], [false, false], [false, true]],
     'create/update ticked, archive unticked by default, duplicates not selectable');
   await page.check('.kar-fix-list input[data-i="2"]');   // accept the archive

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.6.0
+// @version      2.6.1
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -76,6 +76,7 @@
  *   "Desactualizado" (ka_audit tab). "Refresh all" stays for code/format
  *   changes that need every Doc rebuilt.
  *
+ * v2.6.1 - reads the audit sheet in English (and still in Spanish).
  * v2.6.0 - "\u270E Update from Doc" in the bar (apply a Doc copy's red/green
  *   changes to the open KA draft; checks the 100% match first, never saves).
  *   "Test 5" removed. The audit also records who last edited each KA in
@@ -99,7 +100,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.6.0';
+  const SCRIPT_VERSION = '2.6.1';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -1696,11 +1697,12 @@
           if (t.slice(0, 9) === '<!DOCTYPE') { reject(new Error('No access to the sheet (sign into Google)')); return; }
           const rows = parseCsv(t);
           const header = (rows.shift() || []).map((h) => h.trim());
-          const sCol = header.indexOf('estado');
-          const uCol = header.indexOf('Salesforce');
-          const tCol = header.indexOf('t\u00EDtulo');
+          const col = (...names) => names.map((n) => header.indexOf(n)).find((i) => i !== -1) ?? -1;
+          const sCol = col('status', 'estado');
+          const uCol = col('Salesforce');
+          const tCol = col('title', 't\u00EDtulo');
           if (sCol === -1 || uCol === -1) { reject(new Error('No ka_audit tab yet: run \uD83D\uDCCB Audit first')); return; }
-          const list = rows.filter((r) => (r[sCol] || '').trim() === 'Desactualizado')
+          const list = rows.filter((r) => /^(Outdated|Desactualizado)$/.test((r[sCol] || '').trim()))
             .map((r) => {
               const u = (r[uCol] || '').trim();
               return { url: u, title: (r[tCol] || '').trim(), recordId: (u.match(/\/(ka[0-9A-Za-z]{13,16})\//) || [])[1] || '' };
@@ -1715,6 +1717,8 @@
 
   // Every flagged row of the last audit, with what the script can do about it.
   const FIX_ACTIONS = {
+    'In Salesforce, no Doc': 'create', 'Outdated': 'update', 'Extra Doc': 'archive',
+    // older audits wrote the sheet in Spanish
     'En Salesforce sin Doc': 'create', 'Desactualizado': 'update', 'Doc de más': 'archive',
   };
   function fetchAuditRows() {
@@ -1728,7 +1732,9 @@
           if (t.slice(0, 9) === '<!DOCTYPE') { reject(new Error('No access to the sheet (sign into Google)')); return; }
           const rows = parseCsv(t);
           const h = (rows.shift() || []).map((x) => x.trim());
-          const c = (n) => h.indexOf(n);
+          // English column names (Spanish in audits before 2.3.6)
+          const ALIAS = { estado: 'status', equipo: 'team', 't\u00EDtulo': 'title', 'modificado por': 'modified by' };
+          const c = (n) => { const i = h.indexOf(n); return i !== -1 || !ALIAS[n] ? i : h.indexOf(ALIAS[n]); };
           if (c('estado') === -1) { reject(new Error('No ka_audit tab yet: run 📋 Audit first')); return; }
           const out = rows.map((r) => {
             const v = (n) => (c(n) === -1 ? '' : (r[c(n)] || '').trim());
