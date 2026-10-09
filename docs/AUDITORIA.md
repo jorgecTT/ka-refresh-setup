@@ -62,3 +62,19 @@ Los reportes están en `AUDIT_REPORTS`, tanto en `Code.gs` como en el script de 
   verde = agregar), abre el DRAFT del KA, da **Edit** y luego **✎ Update from Doc**.
   Si el Doc sin los cambios no coincide 100% con las 5 cajas, no toca nada.
   Nunca guarda: el writer revisa, da **Save** y luego **Publish**.
+
+## Weekly report (Code.gs 2.4.0 / admin 2.7.0)
+
+Botón **📅 Weekly report** (córrelo los viernes). Lee la lista "Published Articles"
+de Salesforce y manda un email en inglés con lo que cambió desde el último reporte:
+
+- **New KA**: publicado por primera vez esta semana.
+- **New version**: el número de versión subió.
+- **Minor edit**: se editó, pero quedó con el mismo número de versión.
+
+Para cada uno: quién lo hizo, cuándo, el equipo y si el Doc en Drive se sincronizó
+después del cambio (**Synced / Not synced / No Doc**), más una tabla por persona.
+Se guarda en `ka_weekly` (esta semana) y `ka_weekly_log` (historial).
+`ka_weekly_snapshot` guarda las versiones vistas para compararlas la semana siguiente.
+La primera vez usa las fechas de publicación de Salesforce. Si lo corres dos veces
+en menos de 3 días, cuenta como la misma semana.

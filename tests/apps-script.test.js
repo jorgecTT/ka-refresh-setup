@@ -26,6 +26,7 @@ function loadBackend(opts) {
           setValues(v) { for (let i = 0; i < v.length; i++) data[r - 1 + i] = v[i].slice(); },
           setFontWeight() {}, setBackgrounds(b) { backgrounds = b; },
           getValue() { return (data[r - 1] || [])[c - 1]; },
+          getValues() { const out = []; for (let i = 0; i < nr; i++) out.push((data[r - 1 + i] || []).slice(c - 1, c - 1 + nc)); return out; },
         };
       },
       setFrozenRows() {}, autoResizeColumns() {},
@@ -51,6 +52,7 @@ function loadBackend(opts) {
     },
     Utilities: {
       formatDate(d, tz, fmt) {
+        if (fmt === 'MMM d') return d.toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric' });
         const p = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
           hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d)
           .reduce((o, x) => (o[x.type] = x.value, o), {});
@@ -339,4 +341,71 @@ test('auditDocs lists the published KA Docs per team (read-only)', () => {
 });
 
 module.exports = { loadBackend, post };
+
+// ─── weekly report ──────────────────────────────────────────────────────────
+
+test('weekly report: new KAs, new versions and minor edits, who did it and if they synced', () => {
+  const DAY = 86400000, now = Date.now(), iso = t => new Date(t).toISOString();
+  const files = {
+    dNew: { folder: PUB, title: 'Brand new - internal - GTM - EN', description: meta('000301', 'Brand-new'), modifiedDate: iso(now - 1 * DAY) },
+    dVer: { folder: PUB, title: 'Big change - internal - Support Ops - EN', description: meta('000302', 'Big'), modifiedDate: iso(now - 10 * DAY) },
+    dOld: { folder: PUB, title: 'Quiet - internal - GTM - EN', description: meta('000304', 'Quiet'), modifiedDate: iso(now - 40 * DAY) },
+  };
+  const pub = (over) => Object.assign({ lastModifiedBy: 'Ana Writer', createdBy: 'Ana Writer' }, over);
+  let published = [
+    pub({ id: 'k1', articleNumber: '000301', title: 'Brand new', version: 1, firstPublished: iso(now - 2 * DAY), lastPublished: iso(now - 2 * DAY), lastModified: iso(now - 2 * DAY), createdBy: 'Nichole Jensen', lastModifiedBy: 'Nichole Jensen' }),
+    pub({ id: 'k2', articleNumber: '000302', title: 'Big change', version: 5, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 1 * DAY), lastModified: iso(now - 1 * DAY) }),
+    pub({ id: 'k3', articleNumber: '000303', title: 'Thumbtack&#39;s small fix', version: 3, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 30 * DAY), lastModified: iso(now - 1 * DAY) }),
+    pub({ id: 'k4', articleNumber: '000304', title: 'Quiet', version: 2, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 40 * DAY), lastModified: iso(now - 40 * DAY) }),
+  ];
+  const { g, sheets, mails } = loadBackend({ files, props: { SHARED_SECRET: 's' } });
+
+  // 1. first run: read from Salesforce dates
+  let r = post(g, { secret: 's', action: 'weekly', published, by: 'Jorge' });
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.strictEqual(r.firstRun, true);
+  assert.deepStrictEqual(r.counts, { NEW: 1, NEW_VERSION: 1, MINOR_EDIT: 1 });
+  let tab = sheets.ka_weekly.data(), h = tab[0];
+  const row = t => tab.find(x => x[h.indexOf('title')] === t);
+  assert.strictEqual(row('Brand new')[h.indexOf('change')], 'New KA');
+  assert.strictEqual(row('Brand new')[h.indexOf('by')], 'Nichole Jensen');
+  assert.strictEqual(row('Brand new')[h.indexOf('Doc synced')], 'Synced');
+  assert.strictEqual(row('Brand new')[h.indexOf('team')], 'GTM');
+  assert.strictEqual(row('Big change')[h.indexOf('change')], 'New version');
+  assert.strictEqual(row('Big change')[h.indexOf('Doc synced')], 'Not synced');
+  assert.strictEqual(row("Thumbtack's small fix")[h.indexOf('change')], 'Minor edit');
+  assert.strictEqual(row("Thumbtack's small fix")[h.indexOf('Doc synced')], 'No Doc');
+  assert.ok(!row('Quiet'), 'untouched KAs are not listed');
+  assert.strictEqual(mails.length, 1);
+  assert.ok(/^Weekly KA report .* — 1 new, 1 new version, 1 minor edit$/.test(mails[0].subject), mails[0].subject);
+  assert.ok(/First run/.test(mails[0].htmlBody));
+  assert.ok(/v4 → v5/.test(mails[0].htmlBody) && /still v3/.test(mails[0].htmlBody));
+  assert.ok(/<b>Nichole Jensen<\/b>/.test(mails[0].htmlBody) && /2 not synced/.test(mails[0].htmlBody));
+  assert.strictEqual(sheets.ka_weekly_log.data().length, 1 + 3);
+
+  // 2. a re-run the same day keeps the same week: same answer
+  r = post(g, { secret: 's', action: 'weekly', published, by: 'Jorge' });
+  assert.deepStrictEqual(r.counts, { NEW: 1, NEW_VERSION: 1, MINOR_EDIT: 1 });
+
+  // 3. next week: compared with the versions saved last week
+  const snap = sheets.ka_weekly_snapshot.data();
+  snap.slice(1).forEach(x => { if (x[0] === 'cur') x[3] = iso(now - 7 * DAY); else x[3] = iso(now - 14 * DAY); });
+  published = [
+    pub({ id: 'k1', articleNumber: '000301', title: 'Brand new', version: 1, firstPublished: iso(now - 9 * DAY), lastPublished: iso(now - 9 * DAY), lastModified: iso(now - 9 * DAY) }),
+    pub({ id: 'k2b', articleNumber: '000302', title: 'Big change', version: 6, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 2 * DAY), lastModified: iso(now - 2 * DAY), lastModifiedBy: 'Sam Editor' }),
+    pub({ id: 'k3', articleNumber: '000303', title: 'Small fix', version: 3, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 2 * DAY), lastModified: iso(now - 2 * DAY) }),
+    pub({ id: 'k4', articleNumber: '000304', title: 'Quiet', version: 2, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 40 * DAY), lastModified: iso(now - 40 * DAY) }),
+    pub({ id: 'k5', articleNumber: '000305', title: 'No first-published date', version: 1, lastModified: iso(now - 1 * DAY), createdBy: 'Lee Writer' }),
+  ];
+  r = post(g, { secret: 's', action: 'weekly', published, by: 'Jorge' });
+  assert.strictEqual(r.firstRun, false);
+  assert.deepStrictEqual(r.counts, { NEW: 1, NEW_VERSION: 1, MINOR_EDIT: 1 });
+  tab = sheets.ka_weekly.data(); h = tab[0];
+  assert.strictEqual(row('Big change')[h.indexOf('previous version')], '5');
+  assert.strictEqual(row('Big change')[h.indexOf('by')], 'Sam Editor');
+  assert.strictEqual(row('Small fix')[h.indexOf('change')], 'Minor edit', 'republished with the same number = minor edit');
+  assert.strictEqual(row('No first-published date')[h.indexOf('change')], 'New KA');
+  assert.ok(!row('Brand new'), 'last week\'s new KA is not new again');
+});
+
 if (require.main === module) console.log('\n' + passed + ' passed');

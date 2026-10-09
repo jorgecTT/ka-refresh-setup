@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.6.1
+// @version      2.7.0
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -76,6 +76,8 @@
  *   "Desactualizado" (ka_audit tab). "Refresh all" stays for code/format
  *   changes that need every Doc rebuilt.
  *
+ * v2.7.0 - "\uD83D\uDCC5 Weekly report" (run it on Fridays): emails which KAs are new, got a
+ *   new version or a minor edit this week, who did it and if they synced the Doc.
  * v2.6.1 - reads the audit sheet in English (and still in Spanish).
  * v2.6.0 - "\u270E Update from Doc" in the bar (apply a Doc copy's red/green
  *   changes to the open KA draft; checks the 100% match first, never saves).
@@ -100,7 +102,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.6.1';
+  const SCRIPT_VERSION = '2.7.0';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -823,6 +825,8 @@
     .kar-fix-list .kar-act { font-size: 11px; font-weight: 700; border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
     .kar-act.create { background: #E3F5EA; color: #176F30; } .kar-act.update { background: #FFF3DC; color: #8A5300; }
     .kar-act.archive { background: #E8F0FB; color: #2A5A9C; } .kar-act.manual { background: #F0F1F2; color: #5B5D62; }
+    #kar-weekly-btn { background: #2F6FED; color: #fff; }
+    #kar-weekly-btn:hover:not(:disabled) { background: #2259C9; }
     #kar-audit-btn { background: #7A5AF8; color: #fff; }
     #kar-audit-btn:hover:not(:disabled) { background: #6440E5; }
     #kar-overlay { position: fixed; bottom: 66px; right: 20px; z-index: 99999;
@@ -1465,6 +1469,7 @@
       '<button class="kar-main-btn" id="kar-outdated-btn">\u27F3 Refresh outdated</button>' +
       '<button class="kar-main-btn" id="kar-batch-btn">\u27F3 Refresh all</button>' +
       '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>' +
+      '<button class="kar-main-btn" id="kar-weekly-btn">\uD83D\uDCC5 Weekly report</button>' +
       '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>' +
       '<button class="kar-main-btn" id="kar-ufd-btn">\u270E Update from Doc</button>';
     document.body.appendChild(bar);
@@ -1478,11 +1483,12 @@
     document.getElementById('kar-batch-btn').addEventListener('click', () => startBatch(0));
     document.getElementById('kar-outdated-btn').addEventListener('click', () => startBatch(0, 'outdated'));
     document.getElementById('kar-audit-btn').addEventListener('click', () => startAudit());
+    document.getElementById('kar-weekly-btn').addEventListener('click', () => startWeekly());
     document.getElementById('kar-fix-btn').addEventListener('click', () => openFixList());
   }
 
   function setButtonsDisabled(disabled) {
-    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn', 'kar-fix-btn']) {
+    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn', 'kar-weekly-btn', 'kar-fix-btn']) {
       const b = document.getElementById(id);
       if (b) b.disabled = disabled;
     }
@@ -1958,7 +1964,7 @@
   }
 
   // Every published KA with number, URL Name, exact last-modified time and who did it.
-  async function fetchPublishedArticles() {
+  async function fetchPublishedArticles(opts) {
     const base = '/services/data/v59.0/ui-api';
     // Two ways to list the views; in Thumbtack's org /list-info answers 404 and
     // /list-ui works (seen with the probe), so try both.
@@ -1976,8 +1982,14 @@
     if (!views.length) throw new Error('Could not read the Knowledge list views' + (lastErr ? ' (' + lastErr.message + ')' : ''));
     const view = views.find(v => /^published articles$/i.test(v.label.trim())) || views.find(v => /publish/i.test(v.label));
     if (!view) throw new Error('The "Published Articles" list view was not found');
+    // Richest field set first; if Salesforce refuses a field, fall back to fewer
+    // (the editor's name and the publish dates are nice to have, never required).
     const baseFields = ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate'];
-    let fields = baseFields.concat('LastModifiedBy.Name').map(f => 'Knowledge__kav.' + f).join(',');
+    const fieldSets = (opts && opts.dates
+      ? [baseFields.concat('LastModifiedBy.Name', 'FirstPublishedDate', 'LastPublishedDate', 'ArticleCreatedBy.Name', 'CreatedBy.Name')]
+      : []).concat([baseFields.concat('LastModifiedBy.Name'), baseFields])
+      .map(set => set.map(f => 'Knowledge__kav.' + f).join(','));
+    let fields = fieldSets.shift();
     const rows = [];
     let pageToken = null;
     for (let page = 0; page < 25; page++) {
@@ -1985,18 +1997,17 @@
         '?pageSize=2000&optionalFields=' + encodeURIComponent(fields) +
         (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
       let json;
-      try { json = await uiApiGet(listUrl()); }
-      catch (e) {
-        // if Salesforce refuses the editor's name, the audit still runs without it
-        if (page > 0 || /LastModifiedBy/.test(fields) === false) throw e;
-        fields = baseFields.map(f => 'Knowledge__kav.' + f).join(',');
-        json = await uiApiGet(listUrl());
+      for (;;) {
+        try { json = await uiApiGet(listUrl()); break; }
+        catch (e) { if (page > 0 || !fieldSets.length) throw e; fields = fieldSets.shift(); }
       }
       for (const rec of json.records || []) {
         const f = rec.fields || {};
         const v = (k) => (f[k] && f[k].value != null ? f[k].value : '');
         rows.push({ id: rec.id, articleNumber: v('ArticleNumber'), title: v('Title'), urlName: v('UrlName'),
-                    version: v('VersionNumber'), lastModified: v('LastModifiedDate'), lastModifiedBy: whoOf(f.LastModifiedBy) });
+                    version: v('VersionNumber'), lastModified: v('LastModifiedDate'), lastModifiedBy: whoOf(f.LastModifiedBy),
+                    firstPublished: v('FirstPublishedDate'), lastPublished: v('LastPublishedDate'),
+                    createdBy: whoOf(f.ArticleCreatedBy) || whoOf(f.CreatedBy) });
       }
       pageToken = json.nextPageToken;
       if (!pageToken) break;
@@ -2175,6 +2186,38 @@
   }
 
   // -- Audit flow --
+  // -- WEEKLY REPORT (run it on Fridays): new KAs, new versions, minor edits --
+  async function startWeekly() {
+    if (_busy) return;
+    if (getAudit() || getBatch()) { setStatus('error', 'Something else is still running in this tab.'); return; }
+    const reviewer = await ensureReviewer();
+    if (!reviewer) return;
+    if (!(await ensureSecret())) return;
+    setButtonsDisabled(true);
+    try {
+      setStatus('loading', 'Reading the "Published Articles" list\u2026');
+      const published = await fetchPublishedArticles({ dates: true });
+      setStatus('loading', 'Comparing with last week and with Drive\u2026');
+      const res = await apiPost({ action: 'weekly', by: reviewer, published });
+      if (!res || !res.ok) throw new Error(res && res.code === 'BAD_ACTION'
+        ? 'the Google Script is older than this script. Paste the new Code.gs and deploy a New version.'
+        : (res && res.error) || 'no answer from the Google Script');
+      const c = res.counts || {};
+      const body = _overlayBody();
+      if (body) {
+        body.innerHTML = '<div class="kar-title success">\u2713 Weekly report sent</div>' +
+          '<div style="font-size:13px;margin:4px 0">' + escHtml(res.week || '') + '</div>' +
+          '<div style="font-size:13px"><b>' + (c.NEW || 0) + '</b> new \u00B7 <b>' + (c.NEW_VERSION || 0) + '</b> new versions \u00B7 <b>' +
+          (c.MINOR_EDIT || 0) + '</b> minor edits</div>' +
+          (res.firstRun ? '<div style="font-size:12px;color:#5B5D62;margin-top:4px">First run: read from Salesforce dates. From next week on it compares with today.</div>' : '') +
+          (res.sheetUrl ? '<a href="' + escHtml(res.sheetUrl) + '" target="_blank">Open ka_weekly \u2197</a>' : '') +
+          '<div class="kar-meta">Emailed to you</div>' + _reviewerFooter();
+        _showOverlay(); _wireReviewerLink();
+      }
+    } catch (e) { setStatus('error', 'Weekly report stopped: ' + e.message); }
+    setButtonsDisabled(false);
+  }
+
   async function startAudit() {
     if (_busy) return;
     if (getAudit() || getBatch()) { setStatus('error', 'Something else is still running in this tab.'); return; }
