@@ -344,12 +344,11 @@ module.exports = { loadBackend, post };
 
 // ─── weekly report ──────────────────────────────────────────────────────────
 
-test('weekly report: new KAs, new versions and minor edits, who did it and if they synced', () => {
+test('weekly report: updates (new version / minor edit), new and archived KAs, and who did each', () => {
   const DAY = 86400000, now = Date.now(), iso = t => new Date(t).toISOString();
   const files = {
     dNew: { folder: PUB, title: 'Brand new - internal - GTM - EN', description: meta('000301', 'Brand-new'), modifiedDate: iso(now - 1 * DAY) },
     dVer: { folder: PUB, title: 'Big change - internal - Support Ops - EN', description: meta('000302', 'Big'), modifiedDate: iso(now - 10 * DAY) },
-    dOld: { folder: PUB, title: 'Quiet - internal - GTM - EN', description: meta('000304', 'Quiet'), modifiedDate: iso(now - 40 * DAY) },
   };
   const pub = (over) => Object.assign({ lastModifiedBy: 'Ana Writer', createdBy: 'Ana Writer' }, over);
   let published = [
@@ -358,53 +357,58 @@ test('weekly report: new KAs, new versions and minor edits, who did it and if th
     pub({ id: 'k3', articleNumber: '000303', title: 'Thumbtack&#39;s small fix', version: 3, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 30 * DAY), lastModified: iso(now - 1 * DAY) }),
     pub({ id: 'k4', articleNumber: '000304', title: 'Quiet', version: 2, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 40 * DAY), lastModified: iso(now - 40 * DAY) }),
   ];
+  const archived = [
+    { id: 'a1', articleNumber: '000390', title: 'Old program', version: 4, archived: iso(now - 3 * DAY), archivedBy: 'Sam Editor' },
+    { id: 'a2', articleNumber: '000302', title: 'Big change', version: 4, archived: iso(now - 1 * DAY), archivedBy: 'Ana Writer' },   // old version of a live KA
+    { id: 'a3', articleNumber: '000391', title: 'Long gone', version: 2, archived: iso(now - 90 * DAY), archivedBy: 'Sam Editor' },
+  ];
   const { g, sheets, mails } = loadBackend({ files, props: { SHARED_SECRET: 's' } });
 
   // 1. first run: read from Salesforce dates
-  let r = post(g, { secret: 's', action: 'weekly', published, by: 'Jorge' });
+  let r = post(g, { secret: 's', action: 'weekly', published, archived, by: 'Jorge' });
   assert.ok(r.ok, JSON.stringify(r));
   assert.strictEqual(r.firstRun, true);
-  assert.deepStrictEqual(r.counts, { NEW: 1, NEW_VERSION: 1, MINOR_EDIT: 1 });
+  assert.deepStrictEqual(r.counts, { NEW_VERSION: 1, MINOR_EDIT: 1, NEW: 1, ARCHIVED: 1 });
   let tab = sheets.ka_weekly.data(), h = tab[0];
   const row = t => tab.find(x => x[h.indexOf('title')] === t);
+  assert.ok(h.indexOf('Doc synced') === -1, 'no Drive sync info');
   assert.strictEqual(row('Brand new')[h.indexOf('change')], 'New KA');
   assert.strictEqual(row('Brand new')[h.indexOf('by')], 'Nichole Jensen');
-  assert.strictEqual(row('Brand new')[h.indexOf('Doc synced')], 'Synced');
-  assert.strictEqual(row('Brand new')[h.indexOf('team')], 'GTM');
   assert.strictEqual(row('Big change')[h.indexOf('change')], 'New version');
-  assert.strictEqual(row('Big change')[h.indexOf('Doc synced')], 'Not synced');
   assert.strictEqual(row("Thumbtack's small fix")[h.indexOf('change')], 'Minor edit');
-  assert.strictEqual(row("Thumbtack's small fix")[h.indexOf('Doc synced')], 'No Doc');
-  assert.ok(!row('Quiet'), 'untouched KAs are not listed');
-  assert.strictEqual(mails.length, 1);
-  assert.ok(/^Weekly KA report .* — 1 new, 1 new version, 1 minor edit$/.test(mails[0].subject), mails[0].subject);
-  assert.ok(/First run/.test(mails[0].htmlBody));
-  assert.ok(/v4 → v5/.test(mails[0].htmlBody) && /still v3/.test(mails[0].htmlBody));
-  assert.ok(/<b>Nichole Jensen<\/b>/.test(mails[0].htmlBody) && /2 not synced/.test(mails[0].htmlBody));
-  assert.strictEqual(sheets.ka_weekly_log.data().length, 1 + 3);
+  assert.strictEqual(row('Old program')[h.indexOf('change')], 'Archived');
+  assert.strictEqual(row('Old program')[h.indexOf('by')], 'Sam Editor');
+  assert.ok(!row('Quiet') && !row('Long gone'), 'nothing from outside the week');
+  assert.strictEqual(tab.filter(x => x[h.indexOf('title')] === 'Big change').length, 1, 'the archived old version of a live KA is not "archived"');
+  const m = mails[0];
+  assert.ok(/^Weekly KA report .* — 2 updates \(1 new version, 1 minor\), 1 new, 1 archived$/.test(m.subject), m.subject);
+  assert.ok(/<b>2 KAs<\/b> updated in Salesforce: <b>1<\/b> with a new version, <b>1<\/b> minor edit \(no new version\)/.test(m.htmlBody));
+  assert.ok(/v4 → v5/.test(m.htmlBody) && /still v3/.test(m.htmlBody));
+  assert.ok(!/synced/i.test(m.htmlBody), 'no sync info in the email');
+  assert.ok(/<b>Sam Editor<\/b><\/td><td[^>]*>0<\/td><td[^>]*>0<\/td><td[^>]*>0<\/td><td[^>]*>1<\/td>/.test(m.htmlBody), 'per-person table counts the archive');
 
   // 2. a re-run the same day keeps the same week: same answer
-  r = post(g, { secret: 's', action: 'weekly', published, by: 'Jorge' });
-  assert.deepStrictEqual(r.counts, { NEW: 1, NEW_VERSION: 1, MINOR_EDIT: 1 });
+  r = post(g, { secret: 's', action: 'weekly', published, archived, by: 'Jorge' });
+  assert.deepStrictEqual(r.counts, { NEW_VERSION: 1, MINOR_EDIT: 1, NEW: 1, ARCHIVED: 1 });
 
-  // 3. next week: compared with the versions saved last week
+  // 3. next week: compared with the versions saved last week; no archived list -> gone from Published = archived
   const snap = sheets.ka_weekly_snapshot.data();
   snap.slice(1).forEach(x => { if (x[0] === 'cur') x[3] = iso(now - 7 * DAY); else x[3] = iso(now - 14 * DAY); });
   published = [
     pub({ id: 'k1', articleNumber: '000301', title: 'Brand new', version: 1, firstPublished: iso(now - 9 * DAY), lastPublished: iso(now - 9 * DAY), lastModified: iso(now - 9 * DAY) }),
     pub({ id: 'k2b', articleNumber: '000302', title: 'Big change', version: 6, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 2 * DAY), lastModified: iso(now - 2 * DAY), lastModifiedBy: 'Sam Editor' }),
     pub({ id: 'k3', articleNumber: '000303', title: 'Small fix', version: 3, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 2 * DAY), lastModified: iso(now - 2 * DAY) }),
-    pub({ id: 'k4', articleNumber: '000304', title: 'Quiet', version: 2, firstPublished: iso(now - 300 * DAY), lastPublished: iso(now - 40 * DAY), lastModified: iso(now - 40 * DAY) }),
     pub({ id: 'k5', articleNumber: '000305', title: 'No first-published date', version: 1, lastModified: iso(now - 1 * DAY), createdBy: 'Lee Writer' }),
   ];
-  r = post(g, { secret: 's', action: 'weekly', published, by: 'Jorge' });
+  r = post(g, { secret: 's', action: 'weekly', published, archived: null, by: 'Jorge' });
   assert.strictEqual(r.firstRun, false);
-  assert.deepStrictEqual(r.counts, { NEW: 1, NEW_VERSION: 1, MINOR_EDIT: 1 });
+  assert.deepStrictEqual(r.counts, { NEW_VERSION: 1, MINOR_EDIT: 1, NEW: 1, ARCHIVED: 1 });
   tab = sheets.ka_weekly.data(); h = tab[0];
   assert.strictEqual(row('Big change')[h.indexOf('previous version')], '5');
   assert.strictEqual(row('Big change')[h.indexOf('by')], 'Sam Editor');
   assert.strictEqual(row('Small fix')[h.indexOf('change')], 'Minor edit', 'republished with the same number = minor edit');
   assert.strictEqual(row('No first-published date')[h.indexOf('change')], 'New KA');
+  assert.strictEqual(row('Quiet')[h.indexOf('change')], 'Archived', 'published last week, gone now');
   assert.ok(!row('Brand new'), 'last week\'s new KA is not new again');
 });
 

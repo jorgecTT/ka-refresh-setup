@@ -1,6 +1,7 @@
 // End-to-end test of "📅 Weekly report" in the admin userscript: it reads the
 // Published Articles list with the editor's name and the publish dates, posts
-// it to the backend ('weekly') and shows the counts. If Salesforce refuses the
+// it and the Archived Articles list (with who archived) to the backend ('weekly')
+// and shows the counts. If Salesforce refuses the
 // date fields, it asks again with fewer fields instead of failing.
 // Run: node tests/weekly-e2e.test.js   (needs Playwright + Chromium)
 const assert = require('assert'), fs = require('fs'), path = require('path');
@@ -15,14 +16,20 @@ async function run(refuseDates) {
   await p.exposeFunction('__gm', (url, body) => {
     const req = JSON.parse(body || '{}');
     posts.push(req);
-    if (req.action === 'weekly') return JSON.stringify({ ok: true, counts: { NEW: 1, NEW_VERSION: 2, MINOR_EDIT: 3 }, week: 'Oct 3 – Oct 10', firstRun: true, sheetUrl: 'https://docs.google.com/spreadsheets/d/x/edit' });
+    if (req.action === 'weekly') return JSON.stringify({ ok: true, counts: { NEW: 1, NEW_VERSION: 2, MINOR_EDIT: 3, ARCHIVED: 1 }, week: 'Oct 3 – Oct 10', firstRun: true, sheetUrl: 'https://docs.google.com/spreadsheets/d/x/edit' });
     return JSON.stringify({ ok: true });
   });
   await p.route(SF + '/**', r => {
     const u = new URL(r.request().url());
     if (u.pathname.endsWith('/ui-api/list-info/Knowledge__kav')) return r.fulfill({ status: 404, contentType: 'application/json', body: '[]' });
     if (u.pathname.endsWith('/ui-api/list-ui/Knowledge__kav')) return r.fulfill({ contentType: 'application/json',
-      body: JSON.stringify({ lists: [{ apiName: 'Published_Articles', label: 'Published Articles' }] }) });
+      body: JSON.stringify({ lists: [{ apiName: 'Published_Articles', label: 'Published Articles' }, { apiName: 'Archived_Articles', label: 'Archived Articles' }] }) });
+    if (u.pathname.includes('/ui-api/list-records/Knowledge__kav/Archived_Articles')) {
+      const f = u.searchParams.get('optionalFields') || '';
+      const fields = { Title: { value: 'Old program' }, ArticleNumber: { value: '000009000' }, VersionNumber: { value: 3 }, LastModifiedDate: { value: '2026-10-08T10:00:00.000Z' } };
+      if (/ArchivedDate/.test(f)) Object.assign(fields, { ArchivedDate: { value: '2026-10-08T10:00:00.000Z' }, ArchivedBy: { displayValue: 'Sam Editor' } });
+      return r.fulfill({ contentType: 'application/json', body: JSON.stringify({ records: [{ id: 'ka2Vx0000000000ARC', fields }], nextPageToken: null }) });
+    }
     if (u.pathname.includes('/ui-api/list-records/Knowledge__kav/Published_Articles')) {
       const f = u.searchParams.get('optionalFields') || '';
       asked.push(f);
@@ -60,11 +67,13 @@ async function run(refuseDates) {
 (async () => {
   let r = await run(false);
   console.log('OVERLAY:', r.overlay);
-  assert.ok(/Weekly report sent/.test(r.overlay) && /1 new · 2 new versions · 3 minor edits/.test(r.overlay), r.overlay);
+  assert.ok(/Weekly report sent/.test(r.overlay) && /5 updated \(2 new version · 3 minor\) · 1 new · 1 archived/.test(r.overlay), r.overlay);
   assert.strictEqual(r.weekly.by, 'Jorge');
   const k = r.weekly.published[0];
   assert.deepStrictEqual([k.articleNumber, k.version, k.lastModifiedBy, k.createdBy, k.firstPublished, k.lastPublished],
     ['000007636', 46, 'Nichole Jensen', 'Ana Writer', '2025-01-01T00:00:00.000Z', '2026-10-09T15:00:00.000Z']);
+  assert.deepStrictEqual(r.weekly.archived, [{ id: 'ka2Vx0000000000ARC', articleNumber: '000009000', title: 'Old program', version: 3,
+    archived: '2026-10-08T10:00:00.000Z', archivedBy: 'Sam Editor' }]);
   assert.deepStrictEqual(r.errs, []);
 
   r = await run(true);

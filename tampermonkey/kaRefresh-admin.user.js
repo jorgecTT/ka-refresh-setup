@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.7.0
+// @version      2.7.1
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -76,6 +76,7 @@
  *   "Desactualizado" (ka_audit tab). "Refresh all" stays for code/format
  *   changes that need every Doc rebuilt.
  *
+ * v2.7.1 - Weekly report: adds archived KAs (and who archived them), no Drive sync info.
  * v2.7.0 - "\uD83D\uDCC5 Weekly report" (run it on Fridays): emails which KAs are new, got a
  *   new version or a minor edit this week, who did it and if they synced the Doc.
  * v2.6.1 - reads the audit sheet in English (and still in Spanish).
@@ -102,7 +103,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.7.0';
+  const SCRIPT_VERSION = '2.7.1';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -1963,8 +1964,8 @@
     return n && n.value ? String(n.value) : '';
   }
 
-  // Every published KA with number, URL Name, exact last-modified time and who did it.
-  async function fetchPublishedArticles(opts) {
+  // The Knowledge list views of this org ({ apiName, label }).
+  async function knowledgeListViews() {
     const base = '/services/data/v59.0/ui-api';
     // Two ways to list the views; in Thumbtack's org /list-info answers 404 and
     // /list-ui works (seen with the probe), so try both.
@@ -1980,17 +1981,16 @@
       } catch (e) { lastErr = e; }
     }
     if (!views.length) throw new Error('Could not read the Knowledge list views' + (lastErr ? ' (' + lastErr.message + ')' : ''));
-    const view = views.find(v => /^published articles$/i.test(v.label.trim())) || views.find(v => /publish/i.test(v.label));
-    if (!view) throw new Error('The "Published Articles" list view was not found');
-    // Richest field set first; if Salesforce refuses a field, fall back to fewer
-    // (the editor's name and the publish dates are nice to have, never required).
-    const baseFields = ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate'];
-    const fieldSets = (opts && opts.dates
-      ? [baseFields.concat('LastModifiedBy.Name', 'FirstPublishedDate', 'LastPublishedDate', 'ArticleCreatedBy.Name', 'CreatedBy.Name')]
-      : []).concat([baseFields.concat('LastModifiedBy.Name'), baseFields])
-      .map(set => set.map(f => 'Knowledge__kav.' + f).join(','));
-    let fields = fieldSets.shift();
-    const rows = [];
+    return views;
+  }
+
+  // Every record of one list view. fieldSets: richest first; if Salesforce
+  // refuses a field, it asks again with the next (smaller) set.
+  async function listViewRecords(view, fieldSets) {
+    const base = '/services/data/v59.0/ui-api';
+    const sets = fieldSets.map(set => set.map(f => 'Knowledge__kav.' + f).join(','));
+    let fields = sets.shift();
+    const out = [];
     let pageToken = null;
     for (let page = 0; page < 25; page++) {
       const listUrl = () => base + '/list-records/Knowledge__kav/' + encodeURIComponent(view.apiName) +
@@ -1999,21 +1999,47 @@
       let json;
       for (;;) {
         try { json = await uiApiGet(listUrl()); break; }
-        catch (e) { if (page > 0 || !fieldSets.length) throw e; fields = fieldSets.shift(); }
+        catch (e) { if (page > 0 || !sets.length) throw e; fields = sets.shift(); }
       }
       for (const rec of json.records || []) {
         const f = rec.fields || {};
-        const v = (k) => (f[k] && f[k].value != null ? f[k].value : '');
-        rows.push({ id: rec.id, articleNumber: v('ArticleNumber'), title: v('Title'), urlName: v('UrlName'),
-                    version: v('VersionNumber'), lastModified: v('LastModifiedDate'), lastModifiedBy: whoOf(f.LastModifiedBy),
-                    firstPublished: v('FirstPublishedDate'), lastPublished: v('LastPublishedDate'),
-                    createdBy: whoOf(f.ArticleCreatedBy) || whoOf(f.CreatedBy) });
+        out.push({ id: rec.id, f, v: (k) => (f[k] && f[k].value != null ? f[k].value : '') });
       }
       pageToken = json.nextPageToken;
       if (!pageToken) break;
     }
+    return out;
+  }
+
+  // Every published KA with number, URL Name, exact last-modified time and who did it.
+  async function fetchPublishedArticles(opts) {
+    const views = await knowledgeListViews();
+    const view = views.find(v => /^published articles$/i.test(v.label.trim())) || views.find(v => /publish/i.test(v.label));
+    if (!view) throw new Error('The "Published Articles" list view was not found');
+    // the editor's name and the publish dates are nice to have, never required
+    const baseFields = ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate'];
+    const recs = await listViewRecords(view, (opts && opts.dates
+      ? [baseFields.concat('LastModifiedBy.Name', 'FirstPublishedDate', 'LastPublishedDate', 'ArticleCreatedBy.Name', 'CreatedBy.Name')]
+      : []).concat([baseFields.concat('LastModifiedBy.Name'), baseFields]));
+    const rows = recs.map(({ id, f, v }) => ({ id, articleNumber: v('ArticleNumber'), title: v('Title'), urlName: v('UrlName'),
+      version: v('VersionNumber'), lastModified: v('LastModifiedDate'), lastModifiedBy: whoOf(f.LastModifiedBy),
+      firstPublished: v('FirstPublishedDate'), lastPublished: v('LastPublishedDate'),
+      createdBy: whoOf(f.ArticleCreatedBy) || whoOf(f.CreatedBy) }));
     if (!rows.length) throw new Error('The "Published Articles" list came back empty');
     return rows;
+  }
+
+  // Archived KAs with when and who archived them. null when the org has no
+  // "Archived Articles" list view (the weekly report then says so).
+  async function fetchArchivedArticles() {
+    const views = await knowledgeListViews();
+    const view = views.find(v => /^archived articles$/i.test(v.label.trim())) || views.find(v => /archiv/i.test(v.label));
+    if (!view) return null;
+    const baseFields = ['Title', 'ArticleNumber', 'VersionNumber', 'LastModifiedDate'];
+    const recs = await listViewRecords(view, [baseFields.concat('ArchivedDate', 'ArchivedBy.Name', 'LastModifiedBy.Name'),
+      baseFields.concat('LastModifiedBy.Name'), baseFields]);
+    return recs.map(({ id, f, v }) => ({ id, articleNumber: v('ArticleNumber'), title: v('Title'), version: v('VersionNumber'),
+      archived: v('ArchivedDate') || v('LastModifiedDate'), archivedBy: whoOf(f.ArchivedBy) || whoOf(f.LastModifiedBy) }));
   }
 
   // -- Reading a report table that Salesforce draws a few rows at a time --
@@ -2197,8 +2223,11 @@
     try {
       setStatus('loading', 'Reading the "Published Articles" list\u2026');
       const published = await fetchPublishedArticles({ dates: true });
-      setStatus('loading', 'Comparing with last week and with Drive\u2026');
-      const res = await apiPost({ action: 'weekly', by: reviewer, published });
+      setStatus('loading', 'Reading the "Archived Articles" list\u2026');
+      let archived = null;
+      try { archived = await fetchArchivedArticles(); } catch (e) { archived = null; }
+      setStatus('loading', 'Comparing with last week\u2026');
+      const res = await apiPost({ action: 'weekly', by: reviewer, published, archived });
       if (!res || !res.ok) throw new Error(res && res.code === 'BAD_ACTION'
         ? 'the Google Script is older than this script. Paste the new Code.gs and deploy a New version.'
         : (res && res.error) || 'no answer from the Google Script');
@@ -2207,8 +2236,8 @@
       if (body) {
         body.innerHTML = '<div class="kar-title success">\u2713 Weekly report sent</div>' +
           '<div style="font-size:13px;margin:4px 0">' + escHtml(res.week || '') + '</div>' +
-          '<div style="font-size:13px"><b>' + (c.NEW || 0) + '</b> new \u00B7 <b>' + (c.NEW_VERSION || 0) + '</b> new versions \u00B7 <b>' +
-          (c.MINOR_EDIT || 0) + '</b> minor edits</div>' +
+          '<div style="font-size:13px"><b>' + ((c.NEW_VERSION || 0) + (c.MINOR_EDIT || 0)) + '</b> updated (<b>' + (c.NEW_VERSION || 0) + '</b> new version \u00B7 <b>' +
+          (c.MINOR_EDIT || 0) + '</b> minor) \u00B7 <b>' + (c.NEW || 0) + '</b> new \u00B7 <b>' + (c.ARCHIVED || 0) + '</b> archived</div>' +
           (res.firstRun ? '<div style="font-size:12px;color:#5B5D62;margin-top:4px">First run: read from Salesforce dates. From next week on it compares with today.</div>' : '') +
           (res.sheetUrl ? '<a href="' + escHtml(res.sheetUrl) + '" target="_blank">Open ka_weekly \u2197</a>' : '') +
           '<div class="kar-meta">Emailed to you</div>' + _reviewerFooter();

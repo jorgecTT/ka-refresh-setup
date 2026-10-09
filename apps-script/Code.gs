@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.4.0)
+ * KA Sync v2 — Google Apps Script backend (v2.4.1)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.4.1 (weekly report)
+ *   - Only the changes: updated (new version / minor edit), new and archived
+ *     KAs and who did each one. No Drive sync info.
  *
  * v2.4.0 (weekly report)
  *   - NEW: action 'weekly' (the "Weekly report" button): which KAs are new,
@@ -110,7 +114,7 @@ function _sharedSecret() {
  *                 published: [...], by }
  *               → { ok, counts, total, sheetUrl }
  *   'weekly'  : { secret, published: [...with firstPublished, lastPublished,
- *                 lastModifiedBy, createdBy], by }
+ *                 lastModifiedBy, createdBy], archived: [...] | null, by }
  *               → { ok, counts, since, until, sheetUrl }
  */
 function doPost(e) {
@@ -952,7 +956,8 @@ function _emailAuditSummary(now, by, result, sheetUrl) {
 //   NEW          first published this week
 //   NEW_VERSION  the version number went up (published as a new version)
 //   MINOR_EDIT   edited this week but the version number stayed the same
-// plus who did it and whether the Doc in Drive was synced after the change.
+//   ARCHIVED     archived this week
+// and who did each one in Salesforce.
 // ═══════════════════════════════════════════════════════════════════════════
 
 var WEEKLY_TAB = 'ka_weekly';
@@ -960,9 +965,10 @@ var WEEKLY_LOG_TAB = 'ka_weekly_log';
 var WEEKLY_SNAP_TAB = 'ka_weekly_snapshot';
 var DAY_MS = 24 * 60 * 60 * 1000;
 var WEEKLY_KINDS = [
-  { key: 'NEW',         label: 'New KA',      color: '#d9ead3' },
   { key: 'NEW_VERSION', label: 'New version', color: '#cfe2f3' },
   { key: 'MINOR_EDIT',  label: 'Minor edit',  color: '#fff2cc' },
+  { key: 'NEW',         label: 'New KA',      color: '#d9ead3' },
+  { key: 'ARCHIVED',    label: 'Archived',    color: '#f4c7c3' },
 ];
 
 function _weeklyKind(key) {
@@ -974,42 +980,59 @@ function _weeklyKind(key) {
  * Pure (no Google services).
  *   published: [{ id, articleNumber, title, version, lastModified, lastModifiedBy,
  *                 firstPublished, lastPublished, createdBy }]
- *   baseline:  { articleNumber: { version } } from last week, or null (first run)
- *   docs:      _auditDocs of the Published folder
- * Returns { rows: [{ kind, ka, prevVersion, by, at, sync }], counts }.
+ *   archived:  [{ id, articleNumber, title, version, archived, archivedBy }] or
+ *              null when Salesforce has no "Archived Articles" list
+ *   baseline:  { articleNumber: { version, title } } from last week, or null (first run)
+ *   docs:      _auditDocs of the Published folder (only for the team name)
+ * Returns { rows: [{ kind, ka, prevVersion, by, at }], counts }.
  */
-function runWeekly(published, baseline, docs, sinceMs, untilMs) {
-  var docByNum = {};
-  (docs || []).forEach(function (d) { if (d.kaId) (docByNum[d.kaId] = docByNum[d.kaId] || []).push(d); });
+function runWeekly(published, archived, baseline, docs, sinceMs, untilMs) {
+  var teamByNum = {};
+  (docs || []).forEach(function (d) { if (d.kaId && d.team) teamByNum[d.kaId] = d.team; });
   var inWeek = function (ms) { return ms && ms > sinceMs && ms <= untilMs; };
   var ms = function (iso) { var t = iso ? Date.parse(iso) : NaN; return isNaN(t) ? 0 : t; };
   var rows = [], counts = {};
   WEEKLY_KINDS.forEach(function (k) { counts[k.key] = 0; });
+  var add = function (kind, p, v, prevVersion, by, at) {
+    var num = String(p.articleNumber || '');
+    counts[kind]++;
+    rows.push({ kind: kind, prevVersion: prevVersion, by: by || '', at: at,
+      ka: { recordId: p.id || '', articleNumber: num, title: _plainTitle(p.title), version: v ? String(v) : '', team: teamByNum[num] || '' } });
+  };
+  var live = {};
   (published || []).forEach(function (p) {
     var num = String(p.articleNumber || ''), v = +p.version || 0;
+    live[num] = true;
     var lm = ms(p.lastModified), fp = ms(p.firstPublished), lp = ms(p.lastPublished);
     var prev = baseline ? baseline[num] : null;
-    var kind = '';
-    if (inWeek(fp) || (baseline && !prev && (inWeek(lm) || inWeek(lp)))) kind = 'NEW';
-    else if (prev && v > (+prev.version || 0)) kind = 'NEW_VERSION';
-    else if (!baseline && v > 1 && inWeek(lp) && !inWeek(fp)) kind = 'NEW_VERSION';
-    else if (!baseline && v === 1 && !fp && inWeek(lm)) kind = 'NEW';
-    else if (inWeek(lm)) kind = 'MINOR_EDIT';
-    if (!kind) return;
-    var at = kind === 'NEW' ? (fp || lp || lm) : kind === 'NEW_VERSION' ? (lp > lm ? lp : lm) : lm;
-    var by = kind === 'NEW' ? (p.createdBy || p.lastModifiedBy || '') : (p.lastModifiedBy || '');
-    var ds = docByNum[num] || [];
-    var doc = ds[0] || null;
-    var sync = !doc ? 'NO_DOC' : (doc.modifiedMs + OUTDATED_TOLERANCE_MS >= lm ? 'SYNCED' : 'NOT_SYNCED');
-    counts[kind]++;
-    rows.push({
-      kind: kind, prevVersion: prev ? String(prev.version) : (kind === 'NEW_VERSION' && v > 1 ? String(v - 1) : ''),
-      by: by, at: at, sync: sync, doc: doc,
-      ka: { recordId: p.id, articleNumber: num, title: _plainTitle(p.title), version: String(v || ''), team: doc ? doc.team : '' },
-    });
+    if (inWeek(fp) || (baseline && !prev && (inWeek(lm) || inWeek(lp))) || (!baseline && v === 1 && !fp && inWeek(lm))) {
+      add('NEW', p, v, '', p.createdBy || p.lastModifiedBy, fp || lp || lm);
+    } else if ((prev && v > (+prev.version || 0)) || (!baseline && v > 1 && inWeek(lp))) {
+      add('NEW_VERSION', p, v, prev ? String(prev.version) : String(v - 1), p.lastModifiedBy, lp > lm ? lp : lm);
+    } else if (inWeek(lm)) {
+      add('MINOR_EDIT', p, v, '', p.lastModifiedBy, lm);
+    }
   });
-  var rank = { NEW: 0, NEW_VERSION: 1, MINOR_EDIT: 2 };
-  rows.sort(function (a, b) { return rank[a.kind] - rank[b.kind] || b.at - a.at; });
+  // Archived this week. Publishing a new version archives the old one, so an
+  // article that is still published was not archived.
+  var seenArc = {};
+  if (archived) {
+    archived.forEach(function (a) {
+      var num = String(a.articleNumber || ''), at = ms(a.archived);
+      if (!num || live[num] || !inWeek(at)) return;
+      if (seenArc[num] && seenArc[num].at >= at) return;
+      seenArc[num] = { a: a, at: at };
+    });
+    Object.keys(seenArc).forEach(function (num) { var x = seenArc[num]; add('ARCHIVED', x.a, +x.a.version || 0, '', x.a.archivedBy, x.at); });
+  } else if (baseline) {
+    // no archived list: a KA that was published last week and is gone now
+    Object.keys(baseline).forEach(function (num) {
+      if (live[num]) return;
+      add('ARCHIVED', { articleNumber: num, title: baseline[num].title || ('KA ' + num) }, +baseline[num].version || 0, '', '', untilMs);
+    });
+  }
+  var rank = { NEW_VERSION: 0, MINOR_EDIT: 1, NEW: 2, ARCHIVED: 3 };
+  rows.sort(function (x, y) { return rank[x.kind] - rank[y.kind] || y.at - x.at; });
   return { rows: rows, counts: counts };
 }
 
@@ -1018,12 +1041,12 @@ function _readWeeklySnapshot(ss) {
   var sh = ss.getSheetByName(WEEKLY_SNAP_TAB);
   var out = { cur: null, prev: null };
   if (!sh || sh.getLastRow() < 2) return out;
-  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues();
+  var data = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
   data.forEach(function (r) {
     var gen = String(r[0]), num = String(r[1]).replace(/^'/, '');
     if (gen !== 'cur' && gen !== 'prev') return;
     var g = out[gen] || (out[gen] = { at: 0, map: {} });
-    g.map[num] = { version: r[2] };
+    g.map[num] = { version: r[2], title: r[4] || '' };
     var at = r[3] instanceof Date ? r[3].getTime() : Date.parse(r[3]);
     if (at && at > g.at) g.at = at;
   });
@@ -1035,9 +1058,9 @@ function _writeWeeklySnapshot(ss, snap) {
   ['cur', 'prev'].forEach(function (gen) {
     var g = snap[gen]; if (!g) return;
     var at = new Date(g.at).toISOString();
-    Object.keys(g.map).forEach(function (num) { rows.push([gen, "'" + num, g.map[num].version, at]); });
+    Object.keys(g.map).forEach(function (num) { rows.push([gen, "'" + num, g.map[num].version, at, g.map[num].title || '']); });
   });
-  _writeTab(ss, WEEKLY_SNAP_TAB, ['generation', 'KA number', 'version', 'seen at'], rows);
+  _writeTab(ss, WEEKLY_SNAP_TAB, ['generation', 'KA number', 'version', 'seen at', 'title'], rows);
 }
 
 // Which baseline and window this run uses. A re-run within 3 days of the last
@@ -1049,59 +1072,55 @@ function _weeklyWindow(snap, nowMs) {
   return { baseline: snap.cur ? snap.cur.map : null, sinceMs: snap.cur ? snap.cur.at : nowMs - 7 * DAY_MS, rerun: false };
 }
 
-var SYNC_LABEL = { SYNCED: 'Synced', NOT_SYNCED: 'Not synced', NO_DOC: 'No Doc' };
-
 function handleWeekly(req) {
   var published = req.published || [];
   if (!published.length) return { ok: false, code: 'BAD_REQUEST', error: 'The Published Articles list came empty' };
+  var archived = Array.isArray(req.archived) ? req.archived : null;
   var nowMs = Date.now();
   var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID);
   var snap = _readWeeklySnapshot(ss);
   var win = _weeklyWindow(snap, nowMs);
-  var docs = _auditDocs(KA_FOLDER_ID);
-  var result = runWeekly(published, win.baseline, docs, win.sinceMs, nowMs);
+  var docs = [];
+  try { docs = _auditDocs(KA_FOLDER_ID); } catch (e) {}
+  var result = runWeekly(published, archived, win.baseline, docs, win.sinceMs, nowMs);
 
   var fmt = function (t) { return t ? Utilities.formatDate(new Date(t), LOCAL_TZ, 'yyyy-MM-dd HH:mm') : ''; };
   var day = function (t) { return Utilities.formatDate(new Date(t), LOCAL_TZ, 'MMM d'); };
   var week = day(win.sinceMs) + ' – ' + day(nowMs);
   var by = (req.by || 'unknown').toString();
-  var header = ['change', 'team', 'title', 'KA number', 'version', 'previous version', 'by', 'when', 'Doc synced', 'Salesforce', 'Doc', 'week', 'run'];
+  var header = ['change', 'team', 'title', 'KA number', 'version', 'previous version', 'by', 'when', 'Salesforce', 'week', 'run'];
   var data = result.rows.map(function (r) {
     return [_weeklyKind(r.kind).label, r.ka.team, r.ka.title, "'" + r.ka.articleNumber, r.ka.version, r.prevVersion, r.by, fmt(r.at),
-      SYNC_LABEL[r.sync], r.ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + r.ka.recordId + '/view' : '',
-      r.doc ? 'https://docs.google.com/document/d/' + r.doc.docId + '/edit' : '', week, fmt(nowMs)];
+      r.ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + r.ka.recordId + '/view' : '', week, fmt(nowMs)];
   });
   var sh = _writeTab(ss, WEEKLY_TAB, header, data);
   if (data.length) sh.getRange(2, 1, data.length, 1).setBackgrounds(result.rows.map(function (r) { return [_weeklyKind(r.kind).color]; }));
-  // history: one block per week (a re-run replaces nothing, it just adds rows)
   var log = ss.getSheetByName(WEEKLY_LOG_TAB);
   if (!log) { log = ss.insertSheet(WEEKLY_LOG_TAB); log.appendRow(header); log.setFrozenRows(1); log.getRange(1, 1, 1, header.length).setFontWeight('bold'); }
   if (data.length) log.getRange(log.getLastRow() + 1, 1, data.length, header.length).setValues(data);
 
   // remember the versions seen now
   var map = {};
-  published.forEach(function (p) { if (p.articleNumber) map[String(p.articleNumber)] = { version: +p.version || 0 }; });
-  if (win.rerun) _writeWeeklySnapshot(ss, { cur: { at: nowMs, map: map }, prev: snap.prev });
-  else _writeWeeklySnapshot(ss, { cur: { at: nowMs, map: map }, prev: snap.cur });
+  published.forEach(function (p) { if (p.articleNumber) map[String(p.articleNumber)] = { version: +p.version || 0, title: _plainTitle(p.title) }; });
+  _writeWeeklySnapshot(ss, { cur: { at: nowMs, map: map }, prev: win.rerun ? snap.prev : snap.cur });
 
   var sheetUrl = 'https://docs.google.com/spreadsheets/d/' + CORPUS_SHEET_ID + '/edit#gid=' + sh.getSheetId();
-  try { _emailWeekly(week, by, result, sheetUrl, !win.baseline, fmt); } catch (e) {}
+  try { _emailWeekly(week, by, result, sheetUrl, !win.baseline, archived === null, fmt); } catch (e) {}
   return { ok: true, counts: result.counts, total: result.rows.length, week: week, firstRun: !win.baseline, sheetUrl: sheetUrl };
 }
 
-function _emailWeekly(week, by, result, sheetUrl, firstRun, fmt) {
+function _emailWeekly(week, by, result, sheetUrl, firstRun, noArchivedList, fmt) {
   var to = _auditRecipients();
   if (!to.length) return;
   var c = result.counts;
-  var SYNC_HTML = { SYNCED: '<span style="color:#1e8e3e">✓ Doc synced</span>', NOT_SYNCED: '<span style="color:#c5221f">✗ Doc not synced</span>',
-    NO_DOC: '<span style="color:#c5221f">✗ No Doc in Drive</span>' };
+  var plural = function (n, one, many) { return n + ' ' + (n === 1 ? one : many); };
   var item = function (r) {
     var link = r.ka.recordId ? SF_LIGHTNING + '/lightning/r/Knowledge__kav/' + r.ka.recordId + '/view' : '';
-    var ver = r.kind === 'NEW_VERSION' ? (r.prevVersion ? 'v' + r.prevVersion + ' → v' + r.ka.version : 'v' + r.ka.version)
-      : r.kind === 'MINOR_EDIT' ? 'still v' + r.ka.version : 'v' + r.ka.version;
+    var ver = r.kind === 'NEW_VERSION' ? 'v' + r.prevVersion + ' → v' + r.ka.version
+      : r.kind === 'MINOR_EDIT' ? 'still v' + r.ka.version : r.ka.version ? 'v' + r.ka.version : '';
     return '<li>' + (link ? '<a href="' + link + '">' + _esc(r.ka.title) + '</a>' : _esc(r.ka.title)) +
-      ' <span style="color:#666">· ' + (r.ka.team ? _esc(r.ka.team) + ' · ' : '') + ver + ' · by ' + _esc(r.by || 'unknown') +
-      ' on ' + _esc(fmt(r.at)) + '</span> · ' + SYNC_HTML[r.sync] + '</li>';
+      ' <span style="color:#666">· ' + (r.ka.team ? _esc(r.ka.team) + ' · ' : '') + (ver ? ver + ' · ' : '') +
+      'by <b>' + _esc(r.by || 'unknown') + '</b> on ' + _esc(fmt(r.at)) + '</span></li>';
   };
   var section = function (key, title, help) {
     var list = result.rows.filter(function (r) { return r.kind === key; });
@@ -1109,40 +1128,39 @@ function _emailWeekly(week, by, result, sheetUrl, firstRun, fmt) {
       '<p style="margin:0 0 4px;color:#666;font-size:12px">' + help + '</p>' +
       (list.length ? '<ul style="margin:4px 0">' + list.map(item).join('') + '</ul>' : '<p style="margin:4px 0;color:#666">None this week.</p>');
   };
-  // per person
   var people = {}, order = [];
   result.rows.forEach(function (r) {
     var who = r.by || 'unknown';
-    if (!people[who]) { people[who] = { NEW: 0, NEW_VERSION: 0, MINOR_EDIT: 0, notSynced: 0 }; order.push(who); }
-    people[who][r.kind]++; if (r.sync !== 'SYNCED') people[who].notSynced++;
+    if (!people[who]) { people[who] = { NEW_VERSION: 0, MINOR_EDIT: 0, NEW: 0, ARCHIVED: 0, all: 0 }; order.push(who); }
+    people[who][r.kind]++; people[who].all++;
   });
-  order.sort(function (a, b) { return (people[b].NEW + people[b].NEW_VERSION + people[b].MINOR_EDIT) - (people[a].NEW + people[a].NEW_VERSION + people[a].MINOR_EDIT) || a.localeCompare(b); });
+  order.sort(function (a, b) { return people[b].all - people[a].all || a.localeCompare(b); });
+  var td = 'padding:3px 12px;text-align:right';
   var personRows = order.map(function (who) {
     var x = people[who];
-    return '<tr><td style="padding:3px 10px"><b>' + _esc(who) + '</b></td><td style="padding:3px 10px;text-align:right">' + x.NEW +
-      '</td><td style="padding:3px 10px;text-align:right">' + x.NEW_VERSION + '</td><td style="padding:3px 10px;text-align:right">' + x.MINOR_EDIT +
-      '</td><td style="padding:3px 10px;text-align:right;' + (x.notSynced ? 'color:#c5221f;font-weight:bold' : 'color:#1e8e3e') + '">' +
-      (x.notSynced ? x.notSynced + ' not synced' : 'all synced') + '</td></tr>';
+    return '<tr><td style="padding:3px 12px"><b>' + _esc(who) + '</b></td><td style="' + td + '">' + x.NEW_VERSION + '</td><td style="' + td + '">' +
+      x.MINOR_EDIT + '</td><td style="' + td + '">' + x.NEW + '</td><td style="' + td + '">' + x.ARCHIVED + '</td></tr>';
   }).join('');
-  var total = c.NEW + c.NEW_VERSION + c.MINOR_EDIT;
-  var notSynced = result.rows.filter(function (r) { return r.sync !== 'SYNCED'; }).length;
+  var updated = c.NEW_VERSION + c.MINOR_EDIT;
   var html =
     '<div style="font-family:Arial,sans-serif;font-size:14px;color:#2f3033">' +
     '<h2 style="margin:0 0 6px">Weekly KA report</h2>' +
     '<p style="margin:0 0 12px;color:#666">' + _esc(week) + ' · run by ' + _esc(by) + '</p>' +
     (firstRun ? '<p style="background:#fff2cc;padding:8px 10px">First run: this week is read from Salesforce dates. From next week on, "New version" vs "Minor edit" is compared with the versions saved today.</p>' : '') +
-    '<p><b>' + total + '</b> KA' + (total === 1 ? '' : 's') + ' changed this week: <b>' + c.NEW + '</b> new, <b>' + c.NEW_VERSION + '</b> new version' + (c.NEW_VERSION === 1 ? '' : 's') +
-    ', <b>' + c.MINOR_EDIT + '</b> minor edit' + (c.MINOR_EDIT === 1 ? '' : 's') + '.' +
-    (total ? (notSynced ? ' <span style="color:#c5221f"><b>' + notSynced + '</b> not synced to Drive yet.</span>' : ' <span style="color:#1e8e3e">All synced to Drive. ✅</span>') : '') + '</p>' +
-    (order.length ? '<table style="border-collapse:collapse;margin:8px 0 6px"><tr style="background:#f1f3f4"><th style="padding:3px 10px;text-align:left">Who</th>' +
-      '<th style="padding:3px 10px">New</th><th style="padding:3px 10px">New version</th><th style="padding:3px 10px">Minor edit</th><th style="padding:3px 10px">Drive</th></tr>' + personRows + '</table>' : '') +
-    section('NEW', 'New KAs', 'Published for the first time this week.') +
-    section('NEW_VERSION', 'New versions', 'Published as a new version (the version number went up).') +
+    '<p><b>' + plural(updated, 'KA', 'KAs') + '</b> updated in Salesforce: <b>' + c.NEW_VERSION + '</b> with a new version, <b>' + c.MINOR_EDIT +
+    '</b> minor edit' + (c.MINOR_EDIT === 1 ? '' : 's') + ' (no new version).<br><b>' + c.NEW + '</b> new · <b>' + c.ARCHIVED + '</b> archived.</p>' +
+    (order.length ? '<table style="border-collapse:collapse;margin:8px 0 6px"><tr style="background:#f1f3f4"><th style="padding:3px 12px;text-align:left">Who</th>' +
+      '<th style="padding:3px 12px">New version</th><th style="padding:3px 12px">Minor edit</th><th style="padding:3px 12px">New</th><th style="padding:3px 12px">Archived</th></tr>' +
+      personRows + '</table>' : '') +
+    section('NEW_VERSION', 'Updated with a new version', 'Published as a new version (the version number went up).') +
     section('MINOR_EDIT', 'Minor edits', 'Edited and published without a new version (same version number).') +
+    section('NEW', 'New KAs', 'Published for the first time this week.') +
+    section('ARCHIVED', 'Archived KAs', noArchivedList ? 'Published last week and not anymore (Salesforce did not send who archived them).' : 'Archived in Salesforce this week.') +
     '<p style="margin-top:16px"><a href="' + sheetUrl + '">See the weekly report in the sheet</a></p></div>';
   MailApp.sendEmail({
     to: to.join(','),
-    subject: 'Weekly KA report ' + week + ' — ' + c.NEW + ' new, ' + c.NEW_VERSION + ' new version' + (c.NEW_VERSION === 1 ? '' : 's') + ', ' + c.MINOR_EDIT + ' minor edit' + (c.MINOR_EDIT === 1 ? '' : 's'),
+    subject: 'Weekly KA report ' + week + ' — ' + plural(updated, 'update', 'updates') + ' (' + c.NEW_VERSION + ' new version, ' + c.MINOR_EDIT + ' minor), ' +
+      c.NEW + ' new, ' + c.ARCHIVED + ' archived',
     htmlBody: html,
   });
 }

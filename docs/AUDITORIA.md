@@ -63,18 +63,19 @@ Los reportes están en `AUDIT_REPORTS`, tanto en `Code.gs` como en el script de 
   Si el Doc sin los cambios no coincide 100% con las 5 cajas, no toca nada.
   Nunca guarda: el writer revisa, da **Save** y luego **Publish**.
 
-## Weekly report (Code.gs 2.4.0 / admin 2.7.0)
+## Weekly report (Code.gs 2.4.1 / admin 2.7.1)
 
-Botón **📅 Weekly report** (córrelo los viernes). Lee la lista "Published Articles"
-de Salesforce y manda un email en inglés con lo que cambió desde el último reporte:
+Botón **📅 Weekly report** (córrelo los viernes). Manda un email en inglés solo con
+los cambios en Salesforce desde el último reporte, y quién hizo cada uno:
 
-- **New KA**: publicado por primera vez esta semana.
-- **New version**: el número de versión subió.
-- **Minor edit**: se editó, pero quedó con el mismo número de versión.
+- **Updated with a new version**: el número de versión subió.
+- **Minor edit**: se editó y publicó con el mismo número de versión.
+- **New KA**: publicado por primera vez.
+- **Archived**: archivado esta semana (de la lista "Archived Articles"; las versiones
+  viejas que Salesforce archiva al publicar una nueva no cuentan).
 
-Para cada uno: quién lo hizo, cuándo, el equipo y si el Doc en Drive se sincronizó
-después del cambio (**Synced / Not synced / No Doc**), más una tabla por persona.
-Se guarda en `ka_weekly` (esta semana) y `ka_weekly_log` (historial).
-`ka_weekly_snapshot` guarda las versiones vistas para compararlas la semana siguiente.
-La primera vez usa las fechas de publicación de Salesforce. Si lo corres dos veces
-en menos de 3 días, cuenta como la misma semana.
+Trae una tabla por persona y la lista de cada KA. Se guarda en `ka_weekly`
+(esta semana) y `ka_weekly_log` (historial). `ka_weekly_snapshot` guarda las
+versiones vistas para compararlas la semana siguiente. La primera vez usa las
+fechas de Salesforce. Si lo corres dos veces en menos de 3 días, cuenta como la
+misma semana.
