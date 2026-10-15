@@ -91,6 +91,9 @@ function loadBackend(opts) {
     MailApp: { sendEmail: (m) => mails.push(m) },
     Session: { getEffectiveUser: () => ({ getEmail: () => 'owner@example.com' }) },
     Logger: { log() {} },
+    CacheService: { getScriptCache: () => { const c = (sandbox.__cache = sandbox.__cache || {}); return { get: k => c[k] || null, put: (k, v) => { c[k] = v; } }; } },
+    LockService: { getScriptLock: () => ({ tryLock: () => !opts.locked, releaseLock() {} }) },
+    HtmlService: { createHtmlOutput: h => ({ html: h, setTitle() { return this; }, addMetaTag() { return this; } }) },
     UrlFetchApp: { fetch: (url, o) => { const r = (opts.fetch || (() => ({ code: 404, body: '{}' })))(url, o); return { getResponseCode: () => r.code || 200, getContentText: () => typeof r.body === 'string' ? r.body : JSON.stringify(r.body) }; } },
     ScriptApp: { getProjectTriggers: () => [], deleteTrigger() {}, newTrigger: () => ({ timeBased: () => ({ everyDays: () => ({ atHour: () => ({ create() {} }) }), onWeekDay: () => ({ atHour: () => ({ create() {} }) }) }) }), WeekDay: {} },
   };
@@ -418,13 +421,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.5.1');
+  assert.strictEqual(v.server, '2.6.0');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.5.1');
+  assert.strictEqual(bad.server, '2.6.0');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.5.1');
+  assert.strictEqual(get.server, '2.6.0');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -485,6 +488,25 @@ test('Contentful: last change of each article counts its segments, who did it, s
   // no token: clear message
   const nt = loadBackend({ fetch, props: {} });
   assert.throws(() => nt.g.syncContentful(), /CONTENTFUL_TOKEN/);
+});
+
+test('dashboard button: ?refresh=contentful reads Contentful now, once a minute, one at a time', () => {
+  const fetch = (url) => {
+    const path = url.replace('https://api.contentful.com', '').split('?')[0];
+    const items = path.endsWith('/content_types') ? [{ sys: { id: 'article' }, name: 'Article' }] : path.endsWith('/locales') ? [{ code: 'en-US' }]
+      : path.endsWith('/entries') ? [{ sys: { id: 'a1', contentType: { sys: { id: 'article' } }, updatedAt: '2026-10-01T00:00:00Z', version: 2, publishedVersion: 1 }, fields: { title: { 'en-US': 'One' } } }] : [];
+    return { body: { items, total: items.length } };
+  };
+  const { g, sheets } = loadBackend({ fetch, props: { CONTENTFUL_TOKEN: 't' } });
+  const page = g.doGet({ parameter: { refresh: 'contentful' } });
+  assert.ok(/Updated from Contentful/.test(page.html) && /1 articles/.test(page.html), page.html);
+  assert.strictEqual(sheets.hc_contentful.data().length, 2);
+  const again = g.doGet({ parameter: { refresh: 'contentful' } });
+  assert.ok(/less than a minute ago/.test(again.html), 'second click within a minute does not run it again');
+  const busy = loadBackend({ fetch, props: { CONTENTFUL_TOKEN: 't' }, locked: true });
+  assert.ok(/Someone else is updating/.test(busy.g.doGet({ parameter: { refresh: 'contentful' } }).html));
+  const noTok = loadBackend({ fetch, props: {} });
+  assert.ok(/Could not update/.test(noTok.g.doGet({ parameter: { refresh: 'contentful' } }).html) && /CONTENTFUL_TOKEN/.test(noTok.g.doGet({ parameter: { refresh: 'contentful' } }).html));
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');

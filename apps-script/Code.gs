@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.5.1)
+ * KA Sync v2 — Google Apps Script backend (v2.6.0)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,11 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.6.0 (Contentful)
+ *   - <web app URL>?refresh=contentful reads Contentful right away (the
+ *     dashboard's "Update from Contentful" button). One at a time, at most
+ *     once a minute.
  *
  * v2.5.1 (Contentful)
  *   - Article types: only "Article", not "Article > Segment", "Article > Tip"...
@@ -106,7 +111,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.5.1';
+var CODE_VERSION = '2.6.0';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1365,6 +1370,39 @@ function syncContentful() {
   return msg;
 }
 
+/**
+ * syncContentful on demand, for the dashboard button. Only one at a time, and
+ * not more than once a minute (it only reads Contentful, so the limit is just
+ * to not run it twice by double-clicking).
+ */
+function refreshContentfulNow() {
+  var cache = CacheService.getScriptCache();
+  var last = cache.get('cf_refresh_at');
+  if (last) return { ok: true, skipped: true, message: 'Contentful was read less than a minute ago (' + last + '). The dashboard already has it.' };
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return { ok: false, message: 'Someone else is updating from Contentful right now. Wait a minute and try again.' };
+  try {
+    var msg = syncContentful();
+    cache.put('cf_refresh_at', Utilities.formatDate(new Date(), LOCAL_TZ, 'HH:mm'), 60);
+    return { ok: true, message: msg };
+  } catch (err) {
+    return { ok: false, message: String(err && err.message || err) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function _refreshPage(r) {
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;' +
+    'background:#f7f7f8;color:#2f3033;display:flex;align-items:center;justify-content:center;min-height:90vh;margin:0;padding:16px}' +
+    '.c{background:#fff;border:1px solid #e3e6e8;border-radius:10px;padding:28px 30px;max-width:460px}h1{font-size:22px;margin:0 0 8px}' +
+    'p{margin:6px 0;line-height:1.5}.ok{color:#1b7a43}.bad{color:#c22d2d}</style></head><body><div class="c">' +
+    (r.ok ? '<h1 class="ok">✓ Updated from Contentful</h1>' : '<h1 class="bad">Could not update</h1>') +
+    '<p>' + _esc(r.message) + '</p>' +
+    '<p>' + (r.ok ? 'You can close this tab. The dashboard reloads by itself when you go back to it.' : 'Close this tab and try again, or tell Claude what it says.') + '</p>' +
+    '</div><script>setTimeout(function(){ try { window.close(); } catch (e) {} }, ' + (r.ok ? 2500 : 600000) + ');</script></body></html>';
+}
+
 /** Run once: syncContentful every day around 6am (script time zone). */
 function setupContentfulTrigger() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
@@ -1638,6 +1676,11 @@ function doGet(e) {
   // <web app URL>?version=1 -> which Code.gs this deployment is running
   if (e && e.parameter && e.parameter.version) {
     return _json({ ok: true, app: 'KA Sync v2', actions: CODE_ACTIONS });
+  }
+  // <web app URL>?refresh=contentful -> read Contentful now (the dashboard's "Update from Contentful" button)
+  if (e && e.parameter && e.parameter.refresh === 'contentful') {
+    return HtmlService.createHtmlOutput(_refreshPage(refreshContentfulNow()))
+      .setTitle('Update from Contentful').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   }
   return HtmlService.createHtmlOutput(DASHBOARD_HTML)
     .setTitle('KA Index — Live & Archived')
