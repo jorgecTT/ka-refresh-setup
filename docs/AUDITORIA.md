@@ -95,3 +95,11 @@ Script Properties: `CONTENTFUL_TOKEN` (obligatoria), `CONTENTFUL_SPACE`
 (por defecto zkjkphkd3oqx), `CONTENTFUL_ENV` (master) y `CONTENTFUL_ARTICLE_TYPES`
 (si no, todos los tipos cuyo id o nombre dice "article"). Corre `syncContentful`
 una vez y luego `setupContentfulTrigger` para que corra todos los días.
+
+## Copiar un artículo de Contentful al Content Index (2.7.0)
+
+- Dashboard → Contentful Help Center → **Not indexed**: artículos de `hc_contentful` cuyo título (en cualquier idioma) no está en el corpus. Pruebas y sin título van aparte.
+- **+ Create Doc** abre `<web app URL>?create=contentful&id=<entryId>`: primero muestra el Doc; solo lo crea con **Create the Doc** (`&go=1`).
+- Lee el artículo y sus segmentos de Contentful (solo lectura) y crea el Google Doc en la carpeta Published del Help Center (`1Eh0jaXmPFWx-YjntLh73xxdWni32IeqP`), con nombre `<título> - external - <audiencia> - <EN|ES|PT>` y el encabezado de Auto Sync.
+- Nunca crea dos Docs con el mismo nombre ni edita uno existente. Cada Doc creado queda en la pestaña `hc_created`.
+- `hc_contentful` tiene una columna nueva, `internalName`, que sirve para emparejar un artículo en español con su inglés ("Preset Jobs policy [Spanish]").

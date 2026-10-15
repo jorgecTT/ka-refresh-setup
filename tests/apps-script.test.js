@@ -51,6 +51,7 @@ function loadBackend(opts) {
       createTextOutput: (t) => ({ text: t, setMimeType() { return this; } }),
     },
     Utilities: {
+      newBlob: (html) => ({ html }),
       formatDate(d, tz, fmt) {
         if (!fmt) return '';
         if (fmt === 'MMM d') return d.toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric' });
@@ -64,9 +65,11 @@ function loadBackend(opts) {
     },
     Drive: {
       Files: {
+        insert(meta, blob, o) { const id = 'new' + (Object.keys(files).length + 1); files[id] = { title: meta.title, folder: meta.parents[0].id, html: blob.html, mimeType: meta.mimeType }; return { id }; },
         list(q) {
           const folder = (q.q.match(/'([^']+)' in parents/) || [])[1];
-          const items = Object.keys(files).filter(id => files[id].folder === folder).map(id => ({
+          const title = (q.q.match(/title = '((?:[^'\\]|\\.)*)'/) || [])[1];
+          const items = Object.keys(files).filter(id => files[id].folder === folder && (title == null || files[id].title === title.replace(/\\(.)/g, '$1'))).map(id => ({
             id, title: files[id].title, description: files[id].description || '', modifiedDate: files[id].modifiedDate,
           }));
           return { items };
@@ -77,7 +80,7 @@ function loadBackend(opts) {
       getFileById(id) {
         const f = files[id];
         if (!f) throw new Error('no file ' + id);
-        return { getId: () => id, getName: () => f.title, getDescription: () => f.description || '' };
+        return { getId: () => id, getName: () => f.title, getDescription: () => f.description || '', setDescription: d => { f.description = d; } };
       },
     },
     SpreadsheetApp: { openById: () => ss },
@@ -95,7 +98,7 @@ function loadBackend(opts) {
     LockService: { getScriptLock: () => ({ tryLock: () => !opts.locked, releaseLock() {} }) },
     HtmlService: { createHtmlOutput: h => ({ html: h, setTitle() { return this; }, addMetaTag() { return this; } }) },
     UrlFetchApp: { fetch: (url, o) => { const r = (opts.fetch || (() => ({ code: 404, body: '{}' })))(url, o); return { getResponseCode: () => r.code || 200, getContentText: () => typeof r.body === 'string' ? r.body : JSON.stringify(r.body) }; } },
-    ScriptApp: { getProjectTriggers: () => [], deleteTrigger() {}, newTrigger: () => ({ timeBased: () => ({ everyDays: () => ({ atHour: () => ({ create() {} }) }), onWeekDay: () => ({ atHour: () => ({ create() {} }) }) }) }), WeekDay: {} },
+    ScriptApp: { getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/X/exec' }), getProjectTriggers: () => [], deleteTrigger() {}, newTrigger: () => ({ timeBased: () => ({ everyDays: () => ({ atHour: () => ({ create() {} }) }), onWeekDay: () => ({ atHour: () => ({ create() {} }) }) }) }), WeekDay: {} },
   };
   vm.createContext(sandbox);
   const code = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
@@ -421,13 +424,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.6.0');
+  assert.strictEqual(v.server, '2.7.0');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.6.0');
+  assert.strictEqual(bad.server, '2.7.0');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.6.0');
+  assert.strictEqual(get.server, '2.7.0');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -507,6 +510,75 @@ test('dashboard button: ?refresh=contentful reads Contentful now, once a minute,
   assert.ok(/Someone else is updating/.test(busy.g.doGet({ parameter: { refresh: 'contentful' } }).html));
   const noTok = loadBackend({ fetch, props: {} });
   assert.ok(/Could not update/.test(noTok.g.doGet({ parameter: { refresh: 'contentful' } }).html) && /CONTENTFUL_TOKEN/.test(noTok.g.doGet({ parameter: { refresh: 'contentful' } }).html));
+});
+
+test('Create Doc from Contentful: the article and its segments become a Doc like the Auto Sync ones', () => {
+  const link = (id, t) => ({ sys: { type: 'Link', linkType: t || 'Entry', id } });
+  const txt = (v, marks) => ({ nodeType: 'text', value: v, marks: (marks || []).map(type => ({ type })), data: {} });
+  const doc = (...c) => ({ nodeType: 'document', data: {}, content: c });
+  const para = (...c) => ({ nodeType: 'paragraph', data: {}, content: c });
+  const ent = (id, type, fields, extra) => Object.assign({ sys: Object.assign({ id, contentType: { sys: { id: type } }, updatedAt: '2026-08-07T22:20:11Z' }, extra || {}) },
+    { fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, { 'en-US': v }])) });
+  const all = {
+    art: ent('art', 'helpCenterArticle', { name: 'Preset Jobs policy [Spanish]', title: 'Política de trabajos preestablecidos', slug: 'politica-de-trabajos-preestablecidos',
+      audience: 'Pro', tags: ['Spanish'], bodyText: doc(
+        { nodeType: 'embedded-asset-block', data: { target: link('img1', 'Asset') }, content: [] },
+        para(txt('Ya conoce los '), { nodeType: 'entry-hyperlink', data: { target: link('other') }, content: [txt('trabajos preestablecidos')] }, txt('.')),
+        { nodeType: 'heading-2', data: {}, content: [txt('Cancelaciones', ['bold'])] },
+        { nodeType: 'ordered-list', data: {}, content: [{ nodeType: 'list-item', data: {}, content: [para({ nodeType: 'hyperlink', data: { uri: 'https://www.thumbtack.com/login' }, content: [txt('Inicie sesión')] }, txt(' en su cuenta.'))] }] },
+        { nodeType: 'embedded-entry-block', data: { target: link('tog') }, content: [] },
+        { nodeType: 'embedded-entry-block', data: { target: link('cta') }, content: [] },
+        para(txt('')) ) }),
+    other: ent('other', 'helpCenterArticle', { title: '¿Qué son los trabajos preestablecidos?', slug: 'que-son', bodyText: doc(para(txt('NOT COPIED'))) }),
+    tog: ent('tog', 'contentToggle', { name: 'Breadcrumbs', toggleSegments: [link('seg')] }),
+    seg: ent('seg', 'segment', { name: 'Toggle: x', type: 'Toggle', title: 'Pro tip', content: doc(para(txt('Cancele solo cuando sea necesario.', ['italic']))) }),
+    cta: ent('cta', 'articleCTA', { name: 'next', prompt: 'Next:', actionLabel: 'How you get jobs', actionUrl: 'https://help.thumbtack.com/article/x' }),
+  };
+  const img = { sys: { id: 'img1' }, fields: { title: { 'en-US': 'Pill Pro' } } };
+  let creates = 0;
+  const fetch = (url) => {
+    const u = url.replace('https://api.contentful.com', ''), p = u.split('?')[0];
+    if (p.endsWith('/content_types')) return { body: { items: [{ sys: { id: 'helpCenterArticle' }, name: 'Article' }, { sys: { id: 'segment' }, name: 'Article > Segment' }], total: 2 } };
+    let m = p.match(/\/entries\/(\w+)$/); if (m) return all[m[1]] ? { body: all[m[1]] } : { code: 404, body: {} };
+    if (p.endsWith('/entries')) { const ids = decodeURIComponent(u.match(/sys\.id\[in\]=([^&]+)/)[1]).split(','); return { body: { items: ids.map(i => all[i]).filter(Boolean) } }; }
+    if (p.endsWith('/assets')) return { body: { items: [img] } };
+    return { code: 404, body: {} };
+  };
+  const files = {};
+  const { g, sheets } = loadBackend({ fetch, files, props: { CONTENTFUL_TOKEN: 't' } });
+  // first click: shows what it will create, creates nothing
+  const prev = g.doGet({ parameter: { create: 'contentful', id: 'art' } }).html;
+  assert.ok(/Create this Doc in the Content Index\?/.test(prev) && /Política de trabajos preestablecidos - external - pro - ES/.test(prev), prev.slice(0, 300));
+  assert.ok(/create=contentful&amp;id=art&amp;go=1/.test(prev));
+  assert.strictEqual(Object.keys(files).length, 0, 'preview creates nothing');
+  // "Create the Doc"
+  const made = g.doGet({ parameter: { create: 'contentful', id: 'art', go: '1' } }).html;
+  assert.ok(/Doc created/.test(made) && /docs\.google\.com\/document\/d\/new1\/edit/.test(made), made);
+  const f = files.new1, h = f.html;
+  assert.strictEqual(f.folder, '1Eh0jaXmPFWx-YjntLh73xxdWni32IeqP');
+  assert.strictEqual(f.title, 'Política de trabajos preestablecidos - external - pro - ES');
+  assert.strictEqual(f.mimeType, 'application/vnd.google-apps.document');
+  assert.ok(/<p>Published link: https:\/\/help\.thumbtack\.com\/article\/politica-de-trabajos-preestablecidos<\/p><p>Slug: politica-de-trabajos-preestablecidos<\/p><p>Current refresh: .* — Created from Contentful<\/p>/.test(h), h.slice(0, 400));
+  assert.ok(/<p>Last modified in source: [^<]+<\/p><h1>Política de trabajos preestablecidos<\/h1><p>\[Image: Pill Pro\]<\/p>/.test(h), h.slice(0, 600));
+  assert.ok(/<a href="https:\/\/help\.thumbtack\.com\/article\/que-son">trabajos preestablecidos<\/a>/.test(h), 'link to the other article');
+  assert.ok(!/NOT COPIED/.test(h), 'the other article is not copied in');
+  assert.ok(/<h2>Cancelaciones<\/h2>/.test(h) && /<ol><li><a href="https:\/\/www\.thumbtack\.com\/login">Inicie sesión<\/a> en su cuenta\.<\/li><\/ol>/.test(h), h);
+  assert.ok(/<p><b>Pro tip<\/b><\/p><p><i>Cancele solo cuando sea necesario\.<\/i><\/p>/.test(h), 'toggle > segment');
+  assert.ok(/<p>Next: <a href="https:\/\/help\.thumbtack\.com\/article\/x">How you get jobs<\/a><\/p>/.test(h), 'button');
+  assert.ok(/Created by Content Index Dashboard \| Política de trabajos preestablecidos \|/.test(f.description));
+  const log = sheets.hc_created.data();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(log[0])), ['entryId', 'docId', 'fileName', 'url', 'createdAt', 'createdBy']);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(log[1].slice(0, 3))), ['art', 'new1', 'Política de trabajos preestablecidos - external - pro - ES']);
+  // clicking again never makes a second Doc
+  const again = g.doGet({ parameter: { create: 'contentful', id: 'art', go: '1' } }).html;
+  assert.ok(/Already in the Content Index/.test(again) && /new1/.test(again));
+  assert.strictEqual(Object.keys(files).length, 1);
+  // not an article / bad id
+  assert.ok(/not a Help Center article/.test(g.doGet({ parameter: { create: 'contentful', id: 'seg', go: '1' } }).html));
+  assert.ok(/not a Contentful entry id/.test(g.doGet({ parameter: { create: 'contentful', id: "x' or 1" } }).html));
+  // English, customer
+  const en = g.contentfulDocHtml(ent('e', 'helpCenterArticle', { title: 'What is Google AI search?', audience: ['Customer', 'Pro'], bodyText: doc() }), {}, {}, { helpCenterArticle: true });
+  assert.strictEqual(en.fileName, 'What is Google AI search - external - pro and customer - EN');
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');
