@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.7.0)
+ * KA Sync v2 — Google Apps Script backend (v2.7.1)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -27,12 +27,14 @@
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
  *
- * v2.7.0 (Contentful)
- *   - <web app URL>?create=contentful&id=<entryId> copies a Contentful article
- *     (and its segments) into a new Doc in the Help Center Published folder,
- *     named and headed like the Auto Sync Docs. Shows the Doc first; creates
- *     it only on "Create the Doc" (&go=1). Never two Docs with the same name.
- *     Logged in the hc_created tab. hc_contentful gets an internalName column.
+ * v2.7.1 (Contentful)
+ *   - <web app URL>?create=contentful&id=<entryId> puts an article in the
+ *     Content Index through HC Auto Sync: it adds the article's Help Center
+ *     URL to the Auto Sync "Articles" list, so Auto Sync creates the Doc (in
+ *     its own format) and keeps it updated. With AUTO_SYNC_URL and
+ *     AUTO_SYNC_SECRET set, it also asks Auto Sync to create it right away.
+ *     Shows what it will do first; acts only on "Add it" (&go=1). Logged in
+ *     the hc_created tab. hc_contentful gets an internalName column.
  *
  * v2.6.0 (Contentful)
  *   - <web app URL>?refresh=contentful reads Contentful right away (the
@@ -118,7 +120,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.7.0';
+var CODE_VERSION = '2.7.1';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1421,19 +1423,27 @@ function setupContentfulTrigger() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Copy a Contentful article into the Content Index (2.7.0)
+// Put a Contentful article in the Content Index (2.7.1)
 //
-// For Help Center articles that are in Contentful but have no Doc in the
-// Content Index. The dashboard's "Create Doc" link opens
+// The Help Center Docs are made and kept up to date by HC Auto Sync, from the
+// URLs in its "Articles" list. An article that is not on that list never gets
+// a Doc. The dashboard's "+ Create Doc" link opens
 //   <web app URL>?create=contentful&id=<entryId>
-// which shows what it will create; "Create the Doc" (&go=1) reads the article
-// and its segments from Contentful (read only) and creates the Google Doc in
-// the Help Center "Published" folder, named and headed like the Auto Sync
-// Docs ("<title> - external - <audience> - <EN|ES|PT>"). It never edits or
-// deletes a Doc: if a Doc with that name is already there, it links to it.
+// which says what it will do; "Add it" (&go=1) adds the article's Help Center
+// URL to the Auto Sync list. Auto Sync then creates the Doc in its own format
+// on its next run (weeknights 2am UTC) and keeps it updated from then on.
+// If AUTO_SYNC_URL and AUTO_SYNC_SECRET are set, it also asks Auto Sync to
+// create the Doc right away (the same "create" its batch tool uses, which
+// never makes a second Doc for the same slug).
+//
+// Script Properties (optional):
+//   AUTO_SYNC_SHEET_ID  the Auto Sync article list (default below)
+//   AUTO_SYNC_URL       the Auto Sync web app URL (.../exec)
+//   AUTO_SYNC_SECRET    its SHARED_SECRET
 // ═══════════════════════════════════════════════════════════════════════════
 
-var HC_FOLDER_ID = '1Eh0jaXmPFWx-YjntLh73xxdWni32IeqP';
+var AUTO_SYNC_SHEET_DEFAULT = '1_Ei7R5-BgWBiYySa0dxNS-fYq3ppTj9jlbofMKLYVOM';
+var AUTO_SYNC_TAB = 'Articles';
 var HC_CREATED_TAB = 'hc_created';
 var HC_ARTICLE_URL = 'https://help.thumbtack.com/article/';
 
@@ -1451,177 +1461,9 @@ function _cfStr(entry, name) {
   return typeof v === 'string' ? v.trim() : '';
 }
 
-function _cfLang(article) {
-  var tags = _cfVal(article, 'tags');
-  tags = (Array.isArray(tags) ? tags : [tags || '']).join(' ');
-  var hint = tags + ' ' + _cfStr(article, 'name') + ' ' + _cfStr(article, 'title');
-  if (/spanish|español|espanol/i.test(hint)) return 'ES';
-  if (/portugu[eê]s|portuguese/i.test(hint)) return 'PT';
-  return 'EN';
-}
-
-function _cfAudience(article) {
-  var a = _cfVal(article, 'audience');
-  a = (Array.isArray(a) ? a : [a || '']).map(function (x) { return String(x).trim().toLowerCase(); }).filter(String);
-  var pro = a.some(function (x) { return /pro/.test(x); }), cust = a.some(function (x) { return /customer/.test(x); });
-  return pro && cust ? 'pro and customer' : cust ? 'customer' : 'pro';
-}
-
-/**
- * Pure (no Google services). The Doc for one Contentful article:
- *   article: the article entry; byId: { id: entry } of what it links to;
- *   assets: { id: asset }; isArticle: { contentTypeId: true }.
- * Returns { title, lang, audience, slug, fileName, html }.
- */
-function contentfulDocHtml(article, byId, assets, isArticle, opts) {
-  opts = opts || {};
-  var typeOf = function (e) { return e && e.sys && e.sys.contentType && e.sys.contentType.sys ? e.sys.contentType.sys.id : ''; };
-  var linkUrl = function (e) {
-    var s = e && _cfStr(e, 'slug');
-    return s ? HC_ARTICLE_URL + s : '';
-  };
-  var seen = {};
-  var segment;
-  var rich = function (n, depth) {
-    if (!n || typeof n !== 'object') return '';
-    var kids = function () { return (n.content || []).map(function (c) { return rich(c, depth); }).join(''); };
-    var target = n.data && n.data.target && n.data.target.sys ? n.data.target.sys.id : '';
-    switch (n.nodeType) {
-      case 'document': return kids();
-      case 'text': {
-        var t = _esc(n.value || '');
-        (n.marks || []).forEach(function (m) {
-          if (m.type === 'bold') t = '<b>' + t + '</b>';
-          else if (m.type === 'italic') t = '<i>' + t + '</i>';
-          else if (m.type === 'underline') t = '<u>' + t + '</u>';
-          else if (m.type === 'code') t = '<code>' + t + '</code>';
-        });
-        return t;
-      }
-      case 'paragraph': { var p = kids(); return p.replace(/<[^>]+>|\s/g, '') ? '<p>' + p + '</p>' : ''; }
-      case 'hyperlink': return '<a href="' + _esc(n.data && n.data.uri || '') + '">' + kids() + '</a>';
-      case 'entry-hyperlink': { var u = linkUrl(byId[target]); return u ? '<a href="' + _esc(u) + '">' + kids() + '</a>' : kids(); }
-      case 'asset-hyperlink': return kids();
-      case 'unordered-list': return '<ul>' + kids() + '</ul>';
-      case 'ordered-list': return '<ol>' + kids() + '</ol>';
-      case 'list-item': return '<li>' + kids().replace(/<\/?p>/g, ' ').replace(/^\s+|\s+$/g, '') + '</li>';
-      case 'blockquote': return '<blockquote>' + kids() + '</blockquote>';
-      case 'hr': return '<hr>';
-      case 'table': return '<table border="1" style="border-collapse:collapse">' + kids() + '</table>';
-      case 'table-row': return '<tr>' + kids() + '</tr>';
-      case 'table-header-cell': return '<th>' + kids() + '</th>';
-      case 'table-cell': return '<td>' + kids() + '</td>';
-      case 'embedded-asset-block': {
-        var a = assets[target];
-        var name = a ? (_cfStr(a, 'title') || ((_cfVal(a, 'file') || {}).fileName) || 'image') : 'image';
-        return '<p>[Image: ' + _esc(name) + ']</p>';
-      }
-      case 'embedded-entry-block': case 'embedded-entry-inline': return segment(byId[target], depth + 1);
-      default:
-        if (/^heading-[1-6]$/.test(n.nodeType)) {
-          var lvl = Math.min(6, Math.max(2, +n.nodeType.slice(-1)));
-          var h = kids().replace(/<\/?b>/g, '');
-          return h.replace(/<[^>]+>|\s/g, '') ? '<h' + lvl + '>' + h + '</h' + lvl + '>' : '';
-        }
-        return kids();
-    }
-  };
-  // A segment (tip, toggle, accordion item, button, table...): its heading,
-  // then each rich text and each linked piece in field order. Another
-  // article is only a link, never copied in.
-  segment = function (e, depth) {
-    if (!e || depth > 8) return '';
-    if (isArticle[typeOf(e)]) {
-      var u = linkUrl(e), t = _cfStr(e, 'title') || _cfStr(e, 'name');
-      return t ? '<p>' + (u ? '<a href="' + _esc(u) + '">' + _esc(t) + '</a>' : _esc(t)) + '</p>' : '';
-    }
-    if (seen[e.sys.id]) return '';
-    seen[e.sys.id] = true;
-    var out = '', f = e.fields || {};
-    var head = ['title', 'heading', 'question', 'header'].map(function (k) { return _cfStr(e, k); }).filter(String)[0] || '';
-    if (head) out += '<p><b>' + _esc(head) + '</b></p>';
-    var label = _cfStr(e, 'actionLabel') || _cfStr(e, 'buttonText') || _cfStr(e, 'label');
-    var url = _cfStr(e, 'actionUrl') || _cfStr(e, 'url') || _cfStr(e, 'link');
-    if (label) {
-      var prompt = _cfStr(e, 'prompt');
-      out += '<p>' + (prompt ? _esc(prompt) + ' ' : '') + (url ? '<a href="' + _esc(url) + '">' + _esc(label) + '</a>' : _esc(label)) + '</p>';
-    }
-    Object.keys(f).forEach(function (k) {
-      var v = _cfVal(e, k);
-      if (v && v.nodeType === 'document') { out += rich(v, depth); return; }
-      if (/^(body|text|content|answer|description)$/i.test(k) && typeof v === 'string' && v.trim()) { out += '<p>' + _esc(v.trim()) + '</p>'; return; }
-      (Array.isArray(v) ? v : [v]).forEach(function (x) {
-        if (x && x.sys && x.sys.type === 'Link') {
-          if (x.sys.linkType === 'Entry') out += segment(byId[x.sys.id], depth + 1);
-          else if (x.sys.linkType === 'Asset') out += rich({ nodeType: 'embedded-asset-block', data: { target: x } }, depth);
-        }
-      });
-    });
-    return out;
-  };
-
-  var title = _cfStr(article, 'title') || _cfStr(article, 'name') || 'Untitled';
-  var lang = _cfLang(article), audience = _cfAudience(article), slug = _cfStr(article, 'slug');
-  var body = rich(_cfVal(article, 'bodyText') || _cfVal(article, 'body') || { nodeType: 'document', content: [] }, 0);
-  // the article's other linked pieces that the body does not embed (e.g. a segments list)
-  Object.keys(article.fields || {}).forEach(function (k) {
-    if (k === 'bodyText' || k === 'body') return;
-    var v = _cfVal(article, k);
-    (Array.isArray(v) ? v : [v]).forEach(function (x) {
-      if (x && x.sys && x.sys.type === 'Link' && x.sys.linkType === 'Entry') body += segment(byId[x.sys.id], 1);
-    });
-  });
-  var fmtDate = opts.fmtDate || function (iso) { return iso || ''; };
-  var header = [
-    'Published link: ' + (slug ? HC_ARTICLE_URL + slug : '(not published yet)'),
-    'Slug: ' + (slug || ''),
-    'Current refresh: ' + (opts.today || '') + ' — Created from Contentful' + (opts.by ? ' by ' + opts.by : ''),
-    'Previous refresh: none',
-    'Last modified in source: ' + fmtDate(article.sys.updatedAt),
-  ];
-  var fileName = title.replace(/[¿?]/g, '').replace(/[\\\/:*"<>|]/g, '-').replace(/\s+/g, ' ').trim() +
-    ' - external - ' + audience + ' - ' + lang;
-  var html = '<html><head><meta charset="utf-8"></head><body>' +
-    header.map(function (l) { return '<p>' + _esc(l) + '</p>'; }).join('') +
-    '<h1>' + _esc(title) + '</h1>' + body + '</body></html>';
-  return { title: title, lang: lang, audience: audience, slug: slug, fileName: fileName, html: html };
-}
-
-// The article and everything it links to (segments, the articles it links
-// to, images), read from Contentful. Does not walk into other articles.
-function _cfFetchArticle(entryId, token, base, isArticle) {
-  var article = _cfGet(base + '/entries/' + encodeURIComponent(entryId), token);
-  var typeOf = function (e) { return e.sys.contentType && e.sys.contentType.sys ? e.sys.contentType.sys.id : ''; };
-  if (!isArticle[typeOf(article)]) throw new Error('That Contentful entry is not a Help Center article.');
-  var byId = {}, assets = {}, want = _cfLinks(article), assetIds = [];
-  var assetsOf = function (e) {
-    (function walk(v) {
-      if (!v || typeof v !== 'object') return;
-      if (Array.isArray(v)) { v.forEach(walk); return; }
-      if (v.sys && v.sys.type === 'Link' && v.sys.linkType === 'Asset' && v.sys.id) { assetIds.push(v.sys.id); return; }
-      Object.keys(v).forEach(function (k) { walk(v[k]); });
-    })(e.fields || {});
-  };
-  assetsOf(article);
-  for (var round = 0; round < 8 && want.length; round++) {
-    var ids = want.filter(function (id, i) { return !byId[id] && want.indexOf(id) === i; });
-    want = [];
-    for (var i = 0; i < ids.length; i += 100) {
-      var page = _cfGet(base + '/entries?limit=100&sys.id[in]=' + ids.slice(i, i + 100).join(','), token);
-      (page.items || []).forEach(function (e) {
-        byId[e.sys.id] = e;
-        if (isArticle[typeOf(e)]) return;
-        assetsOf(e);
-        want = want.concat(_cfLinks(e));
-      });
-    }
-  }
-  assetIds = assetIds.filter(function (id, i) { return assetIds.indexOf(id) === i; });
-  for (var j = 0; j < assetIds.length; j += 100) {
-    var ap = _cfGet(base + '/assets?limit=100&sys.id[in]=' + assetIds.slice(j, j + 100).join(','), token);
-    (ap.items || []).forEach(function (a) { assets[a.sys.id] = a; });
-  }
-  return { article: article, byId: byId, assets: assets };
+// Same as Auto Sync's normalizeUrl: no #fragment, no ?query, no trailing slash, lower case.
+function _normHcUrl(url) {
+  return String(url || '').trim().replace(/#.*$/, '').replace(/\?.*$/, '').replace(/\/+$/, '').toLowerCase();
 }
 
 function _cfSetup() {
@@ -1638,56 +1480,82 @@ function _cfSetup() {
   return { token: token, base: base, isArticle: isArticle };
 }
 
-function _hcDocNamed(fileName) {
-  var resp = Drive.Files.list({
-    q: "'" + HC_FOLDER_ID + "' in parents and title = '" + fileName.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "' and trashed = false",
-    fields: 'items(id, title)', maxResults: 5, supportsAllDrives: true, includeItemsFromAllDrives: true,
-  });
-  return (resp.items || [])[0] || null;
-}
-
 function _viewer() {
   try { var u = Session.getActiveUser().getEmail(); if (u) return u.split('@')[0]; } catch (e) {}
   return '';
 }
 
+function _logCreated(entryId, url, status, docUrl, by) {
+  var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID);
+  var sh = ss.getSheetByName(HC_CREATED_TAB);
+  if (!sh) { sh = ss.insertSheet(HC_CREATED_TAB); sh.appendRow(['entryId', 'url', 'status', 'docUrl', 'at', 'by']); }
+  sh.appendRow([entryId, url, status, docUrl || '', Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm'), by || '']);
+}
+
+// Ask Auto Sync to create the Doc now. Returns { ok, docUrl, exists, error }.
+function _autoSyncCreate(url, by) {
+  var props = PropertiesService.getScriptProperties();
+  var app = props.getProperty('AUTO_SYNC_URL'), secret = props.getProperty('AUTO_SYNC_SECRET');
+  if (!app || !secret) return null;
+  var headers = {};
+  try { headers.Authorization = 'Bearer ' + ScriptApp.getOAuthToken(); } catch (e) {}
+  var resp = UrlFetchApp.fetch(app, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers,
+    payload: JSON.stringify({ secret: secret, mode: 'create', url: url, reviewer: by ? 'Content Index Dashboard (' + by + ')' : 'Content Index Dashboard' }) });
+  var r;
+  try { r = JSON.parse(resp.getContentText()); } catch (e) { return { ok: false, error: 'Auto Sync answered HTTP ' + resp.getResponseCode() + ', not JSON (check AUTO_SYNC_URL)' }; }
+  if (r.ok) return { ok: true, docUrl: r.docUrl || '' };
+  if (r.code === 'ALREADY_EXISTS') return { ok: true, exists: true, docUrl: r.existingDocUrl || '' };
+  return { ok: false, error: (r.code ? r.code + ': ' : '') + (r.error || 'unknown error') };
+}
+
 /**
- * The "Create Doc" link. Without go: says what it will create. With go:
- * creates it (or links to the Doc that already has that name).
+ * The "+ Create Doc" link. Without go: says what it will do. With go: adds
+ * the article to the Auto Sync list (once) and, when set up, asks Auto Sync
+ * to create the Doc now.
  */
 function createDocFromContentful(entryId, go) {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(entryId || '')) return { ok: false, message: 'That is not a Contentful entry id.' };
   try {
     var s = _cfSetup();
-    var got = _cfFetchArticle(entryId, s.token, s.base, s.isArticle);
-    var now = new Date(), by = _viewer();
-    var doc = contentfulDocHtml(got.article, got.byId, got.assets, s.isArticle, {
-      today: Utilities.formatDate(now, LOCAL_TZ, 'MMMM d, yyyy'), by: by,
-      fmtDate: function (iso) { return iso ? Utilities.formatDate(new Date(iso), LOCAL_TZ, "MMMM d, yyyy 'at' h:mm a") : ''; },
-    });
-    var existing = _hcDocNamed(doc.fileName);
-    var link = function (id) { return 'https://docs.google.com/document/d/' + id + '/edit'; };
-    if (existing) return { ok: true, exists: true, fileName: doc.fileName, url: link(existing.id), message: 'The Content Index already has this Doc.' };
-    if (!go) return { ok: true, preview: true, fileName: doc.fileName, doc: doc, message: '' };
+    var e = _cfGet(s.base + '/entries/' + encodeURIComponent(entryId), s.token);
+    var type = e.sys.contentType && e.sys.contentType.sys ? e.sys.contentType.sys.id : '';
+    if (!s.isArticle[type]) return { ok: false, message: 'That Contentful entry is not a Help Center article.' };
+    var title = _cfStr(e, 'title') || _cfStr(e, 'name') || '(no title)', slug = _cfStr(e, 'slug');
+    if (!slug) return { ok: false, title: title, message: 'This article has no slug in Contentful, so it has no Help Center URL yet.' };
+    if (!e.sys.publishedVersion) return { ok: false, title: title, message: 'This article is not published in Contentful. Auto Sync only reads published articles: publish it first.' };
+    var url = HC_ARTICLE_URL + slug;
+
+    var props = PropertiesService.getScriptProperties();
+    var sh = SpreadsheetApp.openById(props.getProperty('AUTO_SYNC_SHEET_ID') || AUTO_SYNC_SHEET_DEFAULT).getSheetByName(AUTO_SYNC_TAB);
+    if (!sh) return { ok: false, title: title, message: 'The Auto Sync list has no "' + AUTO_SYNC_TAB + '" tab.' };
+    var rows = sh.getDataRange().getValues(), row = null;
+    for (var i = 1; i < rows.length; i++) if (_normHcUrl(rows[i][0]) === _normHcUrl(url)) { row = rows[i]; break; }
+    var docLink = function (id) { return id ? 'https://docs.google.com/document/d/' + id + '/edit' : ''; };
+    var canNow = !!(props.getProperty('AUTO_SYNC_URL') && props.getProperty('AUTO_SYNC_SECRET'));
+    var base = { ok: true, title: title, url: url, now: canNow };
+    if (row && String(row[3] || '').trim()) return Object.assign(base, { exists: true, docUrl: docLink(String(row[3]).trim()), message: 'Auto Sync already has this article and its Doc.' });
+    if (!go) return Object.assign(base, { preview: true, listed: !!row });
+
     var lock = LockService.getScriptLock();
-    if (!lock.tryLock(20000)) return { ok: false, message: 'Busy right now. Wait a moment and try again.' };
+    if (!lock.tryLock(20000)) return { ok: false, title: title, message: 'Busy right now. Wait a moment and try again.' };
     try {
-      var again = _hcDocNamed(doc.fileName);
-      if (again) return { ok: true, exists: true, fileName: doc.fileName, url: link(again.id), message: 'The Content Index already has this Doc.' };
-      var created = Drive.Files.insert({
-        title: doc.fileName, mimeType: 'application/vnd.google-apps.document', parents: [{ id: HC_FOLDER_ID }],
-      }, Utilities.newBlob(doc.html, 'text/html', doc.fileName + '.html'), { convert: true, supportsAllDrives: true });
-      var stamp = Utilities.formatDate(now, 'UTC', 'yyyy-MM-dd HH:mm');
-      try {
-        DriveApp.getFileById(created.id).setDescription('[' + stamp + ' UTC] Created by Content Index Dashboard' + (by ? ' (' + by + ')' : '') +
-          ' | ' + doc.title + ' | ' + Utilities.formatDate(now, LOCAL_TZ, 'MMMM d, yyyy') + '\n');
-      } catch (e) { /* the Doc is there; the log line is nice to have */ }
-      var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID);
-      var sh = ss.getSheetByName(HC_CREATED_TAB);
-      if (!sh) { sh = ss.insertSheet(HC_CREATED_TAB); sh.appendRow(['entryId', 'docId', 'fileName', 'url', 'createdAt', 'createdBy']); }
-      sh.appendRow([entryId, created.id, doc.fileName, link(created.id), Utilities.formatDate(now, LOCAL_TZ, 'yyyy-MM-dd HH:mm'), by]);
-      return { ok: true, created: true, fileName: doc.fileName, url: link(created.id),
-        message: 'Created in the Content Index. The corpus picks it up on its next run.' };
+      var by = _viewer(), added = false;
+      if (!row) {
+        var again = sh.getDataRange().getValues().some(function (r, k) { return k > 0 && _normHcUrl(r[0]) === _normHcUrl(url); });
+        if (!again) { sh.appendRow([url, '', 'Added by Content Index Dashboard' + (by ? ' (' + by + ')' : '') + ' — waiting for Auto Sync', '', '']); added = true; }
+      }
+      var made = null;
+      try { made = _autoSyncCreate(url, by); } catch (err) { made = { ok: false, error: String(err && err.message || err) }; }
+      if (made && made.ok) {
+        _logCreated(entryId, url, made.exists ? 'already had a Doc' : 'Doc created', made.docUrl, by);
+        return Object.assign(base, { created: !made.exists, exists: !!made.exists, docUrl: made.docUrl,
+          message: made.exists ? 'Auto Sync already had a Doc for this article.' : 'Auto Sync created the Doc. The corpus picks it up on its next run.' });
+      }
+      _logCreated(entryId, url, 'on the Auto Sync list', '', by);
+      return Object.assign(base, { queued: true, added: added,
+        message: (added ? 'Added to the Auto Sync list.' : 'It was already on the Auto Sync list.') +
+          ' Auto Sync creates the Doc on its next run (weeknights, 2am UTC) and keeps it updated after that.' +
+          (made && !made.ok ? ' (Creating it right away did not work: ' + made.error + ')' : '') });
     } finally { lock.releaseLock(); }
   } catch (err) {
     return { ok: false, message: String(err && err.message || err) };
@@ -1696,20 +1564,23 @@ function createDocFromContentful(entryId, go) {
 
 function _createPage(r, entryId) {
   var css = '<style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;background:#f7f7f8;color:#2f3033;margin:0;padding:24px 16px}' +
-    '.c{background:#fff;border:1px solid #e3e6e8;border-radius:10px;padding:24px 26px;max-width:720px;margin:0 auto}h1{font-size:21px;margin:0 0 8px}' +
+    '.c{background:#fff;border:1px solid #e3e6e8;border-radius:10px;padding:24px 26px;max-width:620px;margin:0 auto}h1{font-size:21px;margin:0 0 8px}' +
     'p{margin:6px 0;line-height:1.5}.ok{color:#1b7a43}.bad{color:#c22d2d}.btn{display:inline-block;background:#009fd9;color:#fff;text-decoration:none;' +
-    'padding:9px 16px;border-radius:7px;font-weight:600;margin-top:10px}.prev{border-top:1px solid #eee;margin-top:18px;padding-top:10px;font-size:13px;' +
-    'max-height:420px;overflow:auto;color:#444}.muted{color:#6b7280;font-size:13px}</style>';
+    'padding:9px 16px;border-radius:7px;font-weight:600;margin-top:10px}.muted{color:#6b7280;font-size:13px}a{color:#007fad}</style>';
+  var head = r.title ? '<p><b>' + _esc(r.title) + '</b>' + (r.url ? '<br><a href="' + _esc(r.url) + '" target="_blank">' + _esc(r.url) + '</a>' : '') + '</p>' : '';
+  var open = r.docUrl ? '<a class="btn" href="' + _esc(r.docUrl) + '" target="_blank">Open the Doc</a>' : '';
   var body;
-  if (!r.ok) body = '<h1 class="bad">Could not create the Doc</h1><p>' + _esc(r.message) + '</p><p class="muted">Close this tab and try again, or tell Claude what it says.</p>';
-  else if (r.exists) body = '<h1 class="ok">Already in the Content Index</h1><p>' + _esc(r.fileName) + '</p><a class="btn" href="' + _esc(r.url) + '">Open the Doc</a>';
-  else if (r.created) body = '<h1 class="ok">✓ Doc created</h1><p>' + _esc(r.fileName) + '</p><p>' + _esc(r.message) + '</p><a class="btn" href="' + _esc(r.url) + '">Open the Doc</a>';
+  if (!r.ok) body = '<h1 class="bad">Could not add it</h1>' + head + '<p>' + _esc(r.message) + '</p><p class="muted">Close this tab and try again, or tell Claude what it says.</p>';
+  else if (r.created) body = '<h1 class="ok">✓ Doc created</h1>' + head + '<p>' + _esc(r.message) + '</p>' + open;
+  else if (r.exists) body = '<h1 class="ok">Already in the Content Index</h1>' + head + '<p>' + _esc(r.message) + '</p>' + open;
+  else if (r.queued) body = '<h1 class="ok">✓ On the Auto Sync list</h1>' + head + '<p>' + _esc(r.message) + '</p><p class="muted">You can close this tab.</p>';
   else {
-    var inner = r.doc.html.replace(/^[\s\S]*<body>|<\/body>[\s\S]*$/g, '');
-    body = '<h1>Create this Doc in the Content Index?</h1><p><b>' + _esc(r.fileName) + '</b></p>' +
-      '<p class="muted">It goes to the Help Center "Published" folder, with the same header as the Auto Sync Docs. Nothing changes in Contentful.</p>' +
-      '<a class="btn" href="' + _esc(ScriptApp.getService().getUrl() + '?create=contentful&id=' + encodeURIComponent(entryId) + '&go=1') + '" target="_top">Create the Doc</a>' +
-      '<div class="prev">' + inner + '</div>';
+    body = '<h1>Add this article to the Content Index?</h1>' + head +
+      '<p>' + (r.listed ? 'It is already on the Auto Sync list but has no Doc yet.' : 'This adds its Help Center URL to the HC Auto Sync list.') + ' ' +
+      (r.now ? 'Then Auto Sync creates the Doc right away,' : 'Auto Sync creates the Doc on its next run (weeknights, 2am UTC),') +
+      ' in the same format as every other Help Center Doc, and keeps it updated after that.</p>' +
+      '<p class="muted">Nothing changes in Contentful. Auto Sync never makes a second Doc for the same article.</p>' +
+      '<a class="btn" href="' + _esc(ScriptApp.getService().getUrl() + '?create=contentful&id=' + encodeURIComponent(entryId) + '&go=1') + '" target="_top">Add it</a>';
   }
   return '<!DOCTYPE html><html><head><meta charset="utf-8">' + css + '</head><body><div class="c">' + body + '</div></body></html>';
 }

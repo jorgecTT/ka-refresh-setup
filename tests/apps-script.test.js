@@ -424,13 +424,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.7.0');
+  assert.strictEqual(v.server, '2.7.1');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.7.0');
+  assert.strictEqual(bad.server, '2.7.1');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.7.0');
+  assert.strictEqual(get.server, '2.7.1');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -512,73 +512,62 @@ test('dashboard button: ?refresh=contentful reads Contentful now, once a minute,
   assert.ok(/Could not update/.test(noTok.g.doGet({ parameter: { refresh: 'contentful' } }).html) && /CONTENTFUL_TOKEN/.test(noTok.g.doGet({ parameter: { refresh: 'contentful' } }).html));
 });
 
-test('Create Doc from Contentful: the article and its segments become a Doc like the Auto Sync ones', () => {
-  const link = (id, t) => ({ sys: { type: 'Link', linkType: t || 'Entry', id } });
-  const txt = (v, marks) => ({ nodeType: 'text', value: v, marks: (marks || []).map(type => ({ type })), data: {} });
-  const doc = (...c) => ({ nodeType: 'document', data: {}, content: c });
-  const para = (...c) => ({ nodeType: 'paragraph', data: {}, content: c });
-  const ent = (id, type, fields, extra) => Object.assign({ sys: Object.assign({ id, contentType: { sys: { id: type } }, updatedAt: '2026-08-07T22:20:11Z' }, extra || {}) },
-    { fields: Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, { 'en-US': v }])) });
+test('Create Doc from Contentful: adds the article to the Auto Sync list (once); Auto Sync makes the Doc', () => {
+  const art = (id, f, extra) => ({ sys: Object.assign({ id, contentType: { sys: { id: 'helpCenterArticle' } }, publishedVersion: 5 }, extra || {}),
+    fields: Object.fromEntries(Object.entries(f).map(([k, v]) => [k, { 'en-US': v }])) });
   const all = {
-    art: ent('art', 'helpCenterArticle', { name: 'Preset Jobs policy [Spanish]', title: 'Política de trabajos preestablecidos', slug: 'politica-de-trabajos-preestablecidos',
-      audience: 'Pro', tags: ['Spanish'], bodyText: doc(
-        { nodeType: 'embedded-asset-block', data: { target: link('img1', 'Asset') }, content: [] },
-        para(txt('Ya conoce los '), { nodeType: 'entry-hyperlink', data: { target: link('other') }, content: [txt('trabajos preestablecidos')] }, txt('.')),
-        { nodeType: 'heading-2', data: {}, content: [txt('Cancelaciones', ['bold'])] },
-        { nodeType: 'ordered-list', data: {}, content: [{ nodeType: 'list-item', data: {}, content: [para({ nodeType: 'hyperlink', data: { uri: 'https://www.thumbtack.com/login' }, content: [txt('Inicie sesión')] }, txt(' en su cuenta.'))] }] },
-        { nodeType: 'embedded-entry-block', data: { target: link('tog') }, content: [] },
-        { nodeType: 'embedded-entry-block', data: { target: link('cta') }, content: [] },
-        para(txt('')) ) }),
-    other: ent('other', 'helpCenterArticle', { title: '¿Qué son los trabajos preestablecidos?', slug: 'que-son', bodyText: doc(para(txt('NOT COPIED'))) }),
-    tog: ent('tog', 'contentToggle', { name: 'Breadcrumbs', toggleSegments: [link('seg')] }),
-    seg: ent('seg', 'segment', { name: 'Toggle: x', type: 'Toggle', title: 'Pro tip', content: doc(para(txt('Cancele solo cuando sea necesario.', ['italic']))) }),
-    cta: ent('cta', 'articleCTA', { name: 'next', prompt: 'Next:', actionLabel: 'How you get jobs', actionUrl: 'https://help.thumbtack.com/article/x' }),
+    pol: art('pol', { name: 'Preset Jobs policy [Spanish]', title: 'Política de trabajos preestablecidos', slug: 'politica-de-trabajos-preestablecidos' }),
+    draft: art('draft', { title: 'Draft one', slug: 'draft-one' }, { publishedVersion: undefined }),
+    have: art('have', { title: 'Quote templates', slug: 'quote-templates' }),
+    seg: { sys: { id: 'seg', contentType: { sys: { id: 'segment' } } }, fields: {} },
   };
-  const img = { sys: { id: 'img1' }, fields: { title: { 'en-US': 'Pill Pro' } } };
-  let creates = 0;
-  const fetch = (url) => {
-    const u = url.replace('https://api.contentful.com', ''), p = u.split('?')[0];
+  const posts = [];
+  const fetch = (url, o) => {
+    if (url === 'https://script.google.com/macros/s/AUTO/exec') { const b = JSON.parse(o.payload); posts.push(b);
+      return { body: b.url.endsWith('quote-templates') ? { ok: false, code: 'ALREADY_EXISTS', existingDocUrl: 'https://docs.google.com/document/d/old/edit' } : { ok: true, mode: 'create', docUrl: 'https://docs.google.com/document/d/new1/edit' } }; }
+    const p = url.replace('https://api.contentful.com', '').split('?')[0];
     if (p.endsWith('/content_types')) return { body: { items: [{ sys: { id: 'helpCenterArticle' }, name: 'Article' }, { sys: { id: 'segment' }, name: 'Article > Segment' }], total: 2 } };
-    let m = p.match(/\/entries\/(\w+)$/); if (m) return all[m[1]] ? { body: all[m[1]] } : { code: 404, body: {} };
-    if (p.endsWith('/entries')) { const ids = decodeURIComponent(u.match(/sys\.id\[in\]=([^&]+)/)[1]).split(','); return { body: { items: ids.map(i => all[i]).filter(Boolean) } }; }
-    if (p.endsWith('/assets')) return { body: { items: [img] } };
+    const m = p.match(/\/entries\/(\w+)$/); if (m && all[m[1]]) return { body: all[m[1]] };
     return { code: 404, body: {} };
   };
-  const files = {};
-  const { g, sheets } = loadBackend({ fetch, files, props: { CONTENTFUL_TOKEN: 't' } });
-  // first click: shows what it will create, creates nothing
-  const prev = g.doGet({ parameter: { create: 'contentful', id: 'art' } }).html;
-  assert.ok(/Create this Doc in the Content Index\?/.test(prev) && /Política de trabajos preestablecidos - external - pro - ES/.test(prev), prev.slice(0, 300));
-  assert.ok(/create=contentful&amp;id=art&amp;go=1/.test(prev));
-  assert.strictEqual(Object.keys(files).length, 0, 'preview creates nothing');
-  // "Create the Doc"
-  const made = g.doGet({ parameter: { create: 'contentful', id: 'art', go: '1' } }).html;
-  assert.ok(/Doc created/.test(made) && /docs\.google\.com\/document\/d\/new1\/edit/.test(made), made);
-  const f = files.new1, h = f.html;
-  assert.strictEqual(f.folder, '1Eh0jaXmPFWx-YjntLh73xxdWni32IeqP');
-  assert.strictEqual(f.title, 'Política de trabajos preestablecidos - external - pro - ES');
-  assert.strictEqual(f.mimeType, 'application/vnd.google-apps.document');
-  assert.ok(/<p>Published link: https:\/\/help\.thumbtack\.com\/article\/politica-de-trabajos-preestablecidos<\/p><p>Slug: politica-de-trabajos-preestablecidos<\/p><p>Current refresh: .* — Created from Contentful<\/p>/.test(h), h.slice(0, 400));
-  assert.ok(/<p>Last modified in source: [^<]+<\/p><h1>Política de trabajos preestablecidos<\/h1><p>\[Image: Pill Pro\]<\/p>/.test(h), h.slice(0, 600));
-  assert.ok(/<a href="https:\/\/help\.thumbtack\.com\/article\/que-son">trabajos preestablecidos<\/a>/.test(h), 'link to the other article');
-  assert.ok(!/NOT COPIED/.test(h), 'the other article is not copied in');
-  assert.ok(/<h2>Cancelaciones<\/h2>/.test(h) && /<ol><li><a href="https:\/\/www\.thumbtack\.com\/login">Inicie sesión<\/a> en su cuenta\.<\/li><\/ol>/.test(h), h);
-  assert.ok(/<p><b>Pro tip<\/b><\/p><p><i>Cancele solo cuando sea necesario\.<\/i><\/p>/.test(h), 'toggle > segment');
-  assert.ok(/<p>Next: <a href="https:\/\/help\.thumbtack\.com\/article\/x">How you get jobs<\/a><\/p>/.test(h), 'button');
-  assert.ok(/Created by Content Index Dashboard \| Política de trabajos preestablecidos \|/.test(f.description));
-  const log = sheets.hc_created.data();
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(log[0])), ['entryId', 'docId', 'fileName', 'url', 'createdAt', 'createdBy']);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(log[1].slice(0, 3))), ['art', 'new1', 'Política de trabajos preestablecidos - external - pro - ES']);
-  // clicking again never makes a second Doc
-  const again = g.doGet({ parameter: { create: 'contentful', id: 'art', go: '1' } }).html;
-  assert.ok(/Already in the Content Index/.test(again) && /new1/.test(again));
-  assert.strictEqual(Object.keys(files).length, 1);
-  // not an article / bad id
-  assert.ok(/not a Help Center article/.test(g.doGet({ parameter: { create: 'contentful', id: 'seg', go: '1' } }).html));
-  assert.ok(/not a Contentful entry id/.test(g.doGet({ parameter: { create: 'contentful', id: "x' or 1" } }).html));
-  // English, customer
-  const en = g.contentfulDocHtml(ent('e', 'helpCenterArticle', { title: 'What is Google AI search?', audience: ['Customer', 'Pro'], bodyText: doc() }), {}, {}, { helpCenterArticle: true });
-  assert.strictEqual(en.fileName, 'What is Google AI search - external - pro and customer - EN');
+  const seed = (sheets) => { const sh = sheets.Articles; sh.appendRow(['URL', 'Last updatedAt', '', '', '']);
+    sh.appendRow(['https://help.thumbtack.com/article/Quote-Templates/', '2026-06-08', 'no change', 'docQT', 'h']); };
+  // 1) not set up for "right away": only adds to the list
+  let B = loadBackend({ fetch, props: { CONTENTFUL_TOKEN: 't' } });
+  B.g.SpreadsheetApp.openById('x').insertSheet('Articles'); seed(B.sheets);
+  const prev = B.g.doGet({ parameter: { create: 'contentful', id: 'pol' } }).html;
+  assert.ok(/Add this article to the Content Index\?/.test(prev) && /help\.thumbtack\.com\/article\/politica-de-trabajos-preestablecidos/.test(prev), prev);
+  assert.ok(/next run \(weeknights, 2am UTC\)/.test(prev) && /create=contentful&amp;id=pol&amp;go=1/.test(prev));
+  assert.strictEqual(B.sheets.Articles.data().length, 2, 'the preview adds nothing');
+  const done = B.g.doGet({ parameter: { create: 'contentful', id: 'pol', go: '1' } }).html;
+  assert.ok(/On the Auto Sync list/.test(done) && /Added to the Auto Sync list/.test(done), done);
+  const rows = B.sheets.Articles.data();
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows[2][0], 'https://help.thumbtack.com/article/politica-de-trabajos-preestablecidos');
+  assert.ok(rows[2][1] === '' && rows[2][3] === '' && rows[2][4] === '', 'empty updatedAt, fileId and hash: Auto Sync creates the Doc');
+  assert.ok(/Added by Content Index Dashboard/.test(rows[2][2]));
+  const again = B.g.doGet({ parameter: { create: 'contentful', id: 'pol', go: '1' } }).html;
+  assert.ok(/already on the Auto Sync list/.test(again) && B.sheets.Articles.data().length === 3, 'never added twice');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(B.sheets.hc_created.data()[0])), ['entryId', 'url', 'status', 'docUrl', 'at', 'by']);
+  assert.strictEqual(B.sheets.hc_created.data()[1][2], 'on the Auto Sync list');
+  // already listed with a Doc (URL written differently): links to it, adds nothing
+  const have = B.g.doGet({ parameter: { create: 'contentful', id: 'have', go: '1' } }).html;
+  assert.ok(/Already in the Content Index/.test(have) && /document\/d\/docQT\/edit/.test(have), have);
+  assert.strictEqual(B.sheets.Articles.data().length, 3);
+  // not published, not an article, bad id
+  assert.ok(/not published in Contentful/.test(B.g.doGet({ parameter: { create: 'contentful', id: 'draft', go: '1' } }).html));
+  assert.ok(/not a Help Center article/.test(B.g.doGet({ parameter: { create: 'contentful', id: 'seg', go: '1' } }).html));
+  assert.ok(/not a Contentful entry id/.test(B.g.doGet({ parameter: { create: 'contentful', id: "x' or 1" } }).html));
+  assert.strictEqual(posts.length, 0, 'never calls Auto Sync when it is not set up');
+  // 2) with AUTO_SYNC_URL + AUTO_SYNC_SECRET: also asks Auto Sync to create it now
+  B = loadBackend({ fetch, props: { CONTENTFUL_TOKEN: 't', AUTO_SYNC_URL: 'https://script.google.com/macros/s/AUTO/exec', AUTO_SYNC_SECRET: 's3' } });
+  B.g.SpreadsheetApp.openById('x').insertSheet('Articles'); seed(B.sheets);
+  assert.ok(/Auto Sync creates the Doc right away/.test(B.g.doGet({ parameter: { create: 'contentful', id: 'pol' } }).html));
+  const now = B.g.doGet({ parameter: { create: 'contentful', id: 'pol', go: '1' } }).html;
+  assert.ok(/Doc created/.test(now) && /document\/d\/new1\/edit/.test(now), now);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), { secret: 's3', mode: 'create', url: 'https://help.thumbtack.com/article/politica-de-trabajos-preestablecidos', reviewer: 'Content Index Dashboard' });
+  assert.strictEqual(B.sheets.Articles.data().length, 3, 'on the list too, so Auto Sync keeps it updated');
+  assert.strictEqual(B.sheets.hc_created.data()[1][2], 'Doc created');
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');

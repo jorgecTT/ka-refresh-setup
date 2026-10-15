@@ -96,10 +96,11 @@ Script Properties: `CONTENTFUL_TOKEN` (obligatoria), `CONTENTFUL_SPACE`
 (si no, todos los tipos cuyo id o nombre dice "article"). Corre `syncContentful`
 una vez y luego `setupContentfulTrigger` para que corra todos los días.
 
-## Copiar un artículo de Contentful al Content Index (2.7.0)
+## Artículos de Contentful que no están en el Content Index (2.7.1)
 
 - Dashboard → Contentful Help Center → **Not indexed**: artículos de `hc_contentful` cuyo título (en cualquier idioma) no está en el corpus. Pruebas y sin título van aparte.
-- **+ Create Doc** abre `<web app URL>?create=contentful&id=<entryId>`: primero muestra el Doc; solo lo crea con **Create the Doc** (`&go=1`).
-- Lee el artículo y sus segmentos de Contentful (solo lectura) y crea el Google Doc en la carpeta Published del Help Center (`1Eh0jaXmPFWx-YjntLh73xxdWni32IeqP`), con nombre `<título> - external - <audiencia> - <EN|ES|PT>` y el encabezado de Auto Sync.
-- Nunca crea dos Docs con el mismo nombre ni edita uno existente. Cada Doc creado queda en la pestaña `hc_created`.
-- `hc_contentful` tiene una columna nueva, `internalName`, que sirve para emparejar un artículo en español con su inglés ("Preset Jobs policy [Spanish]").
+- La causa normal: el artículo no está en la lista `Articles` del HC Auto Sync, que es quien crea y mantiene los Docs.
+- **+ Create Doc** abre `<web app URL>?create=contentful&id=<entryId>`: primero dice qué va a hacer; con **Add it** (`&go=1`) agrega el URL del artículo a la lista del Auto Sync (una sola vez). El Auto Sync crea el Doc en su siguiente corrida y lo mantiene.
+- Con `AUTO_SYNC_URL` y `AUTO_SYNC_SECRET` en Script Properties, además le pide al Auto Sync que lo cree al momento (modo `create`, que no duplica por slug).
+- Solo artículos publicados. Cada acción queda en la pestaña `hc_created`. El dashboard lee la lista del Auto Sync para mostrar el estado.
+- `hc_contentful` tiene una columna nueva, `internalName`, para emparejar el español con su inglés ("Preset Jobs policy [Spanish]").
