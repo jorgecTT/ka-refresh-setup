@@ -418,13 +418,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.5.0');
+  assert.strictEqual(v.server, '2.5.1');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.5.0');
+  assert.strictEqual(bad.server, '2.5.1');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.5.0');
+  assert.strictEqual(get.server, '2.5.1');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -445,7 +445,8 @@ test('Contentful: last change of each article counts its segments, who did it, s
     E('a3', 'helpCenterArticle', { title: { 'en-US': 'Old one' } }, { updatedAt: '2024-01-01T10:00:00Z', updatedBy: U('u3'), publishedAt: '2024-01-01T10:00:00Z', publishedBy: U('u3') }),
   ];
   const pages = {
-    '/content_types': [{ sys: { id: 'helpCenterArticle' }, name: 'Help Center Article' }, { sys: { id: 'section' }, name: 'Section' }, { sys: { id: 'accordionItem' }, name: 'Accordion item' }],
+    // like the real space: the pieces are named "Article > ..."
+    '/content_types': [{ sys: { id: 'helpCenterArticle' }, name: 'Article' }, { sys: { id: 'section' }, name: 'Article > Segment' }, { sys: { id: 'accordionItem' }, name: 'Article > Toggle' }],
     '/locales': [{ code: 'en-US' }, { code: 'es-US' }, { code: 'pt-BR' }],
     '/entries': entries,
     '/users': [{ sys: { id: 'u1' }, firstName: 'Ana', lastName: 'Writer' }, { sys: { id: 'u2' }, firstName: 'Nichole', lastName: 'Jensen' }],
@@ -460,7 +461,7 @@ test('Contentful: last change of each article counts its segments, who did it, s
   };
   const { g, sheets } = loadBackend({ fetch, props: { CONTENTFUL_TOKEN: 'tok' } });
   const msg = g.syncContentful();
-  assert.ok(/3 articles/.test(msg), msg);
+  assert.ok(/3 articles \(helpCenterArticle\)/.test(msg), msg);
   assert.ok(urls.every(u => u[1] === 'get' && u[2] === 'Bearer tok'), 'read only, with the token');
   assert.ok(urls.some(u => /\/spaces\/zkjkphkd3oqx\/environments\/master\/entries\?limit=1000&skip=0/.test(u[0])));
   const tab = sheets.hc_contentful.data(), h = tab[0];
@@ -470,7 +471,7 @@ test('Contentful: last change of each article counts its segments, who did it, s
   assert.strictEqual(col(a1, 'titleES'), 'Prospectos y oportunidades');
   assert.strictEqual(col(a1, 'lastUpdated'), '2026-10-10T10:00:00Z', 'the newest change is in a segment');
   assert.strictEqual(col(a1, 'lastUpdatedBy'), 'Nichole Jensen');
-  assert.strictEqual(col(a1, 'changedIn'), 'Accordion item: Why was I charged?');
+  assert.strictEqual(col(a1, 'changedIn'), 'Article > Toggle: Why was I charged?');
   assert.strictEqual(col(a1, 'sharedWith'), 1, 'that item is also in Refunds');
   assert.strictEqual(col(a1, 'unpublishedChanges'), 'yes');
   assert.strictEqual(col(a1, 'segments'), 4, 'sections, items and rich-text embeds, not the related article');
@@ -480,6 +481,7 @@ test('Contentful: last change of each article counts its segments, who did it, s
   assert.strictEqual(col(row('Old one'), 'lastUpdatedBy'), 'Unknown user (u3)');
   assert.strictEqual(tab[1][h.indexOf('titleEN')], 'Leads and opportunities', 'newest first');
   assert.ok(/app\.contentful\.com\/spaces\/zkjkphkd3oqx\/environments\/master\/entries\/a1/.test(col(a1, 'contentfulUrl')));
+  assert.deepStrictEqual(g._cfArticleTypes([{ sys:{id:'x'}, name:'Article > Tip' }, { sys:{id:'y'}, name:'FAQ article' }]), ['y'], 'without an exact "Article", sub-types are still left out');
   // no token: clear message
   const nt = loadBackend({ fetch, props: {} });
   assert.throws(() => nt.g.syncContentful(), /CONTENTFUL_TOKEN/);

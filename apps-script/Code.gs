@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.5.0)
+ * KA Sync v2 — Google Apps Script backend (v2.5.1)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.5.1 (Contentful)
+ *   - Article types: only "Article", not "Article > Segment", "Article > Tip"...
+ *     (those are the segments inside an article).
  *
  * v2.5.0 (Contentful)
  *   - NEW: syncContentful() (daily, setupContentfulTrigger) reads the Help
@@ -102,7 +106,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.5.0';
+var CODE_VERSION = '2.5.1';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1192,7 +1196,8 @@ function _emailWeekly(week, by, result, sheetUrl, firstRun, noArchivedList, fmt)
 //   CONTENTFUL_SPACE          space id (default zkjkphkd3oqx)
 //   CONTENTFUL_ENV            environment (default master)
 //   CONTENTFUL_ARTICLE_TYPES  content type ids of an article, comma-separated
-//                             (default: every type whose id or name says "article")
+//                             (default: the type named "Article"; types like
+//                             "Article > Segment" are segments, not articles)
 // ═══════════════════════════════════════════════════════════════════════════
 
 var HC_CONTENTFUL_TAB = 'hc_contentful';
@@ -1312,6 +1317,16 @@ function contentfulArticleRows(entries, types, users, locales, articleTypes) {
   }).sort(function (x, y) { return ms(y.lastUpdated) - ms(x.lastUpdated); });
 }
 
+// The content types that ARE an article. Types named like "Article > Segment" or
+// "Article > Tip" are pieces inside an article, not articles. If there is a type
+// called exactly "Article", only that one.
+function _cfArticleTypes(typeList) {
+  var exact = typeList.filter(function (t) { return /^\s*(help\s*center\s*)?article\s*$/i.test(t.name || ''); });
+  if (exact.length) return exact.map(function (t) { return t.sys.id; });
+  return typeList.filter(function (t) { return /article/i.test(t.sys.id + ' ' + (t.name || '')) && !/[>\/]/.test(t.name || ''); })
+    .map(function (t) { return t.sys.id; });
+}
+
 function syncContentful() {
   var props = PropertiesService.getScriptProperties();
   var token = props.getProperty('CONTENTFUL_TOKEN');
@@ -1324,8 +1339,7 @@ function syncContentful() {
   var types = {};
   typeList.forEach(function (t) { types[t.sys.id] = t.name || t.sys.id; });
   var wanted = (props.getProperty('CONTENTFUL_ARTICLE_TYPES') || '').split(',').map(function (x) { return x.trim(); }).filter(String);
-  var articleTypes = wanted.length ? wanted : typeList.filter(function (t) { return /article/i.test(t.sys.id + ' ' + (t.name || '')); })
-    .map(function (t) { return t.sys.id; });
+  var articleTypes = wanted.length ? wanted : _cfArticleTypes(typeList);
   if (!articleTypes.length) throw new Error('No content type looks like an article. Set CONTENTFUL_ARTICLE_TYPES. Types: ' + Object.keys(types).join(', '));
   var locales = _cfAll(base + '/locales', token).map(function (l) { return l.code; });
   var entries = _cfAll(base + '/entries', token);
