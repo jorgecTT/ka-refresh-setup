@@ -79,3 +79,19 @@ Trae una tabla por persona y la lista de cada KA. Se guarda en `ka_weekly`
 versiones vistas para compararlas la semana siguiente. La primera vez usa las
 fechas de Salesforce. Si lo corres dos veces en menos de 3 días, cuenta como la
 misma semana.
+
+## Contentful (Code.gs 2.5.0)
+
+`syncContentful()` lee una vez al día el espacio del Help Center en Contentful
+(solo lectura, llamadas GET) y escribe la pestaña `hc_contentful`: una fila por
+artículo con cuándo se cambió por última vez y quién, contando también cada
+segmento enlazado dentro del artículo (secciones, acordeones, ítems, rich text).
+Si un segmento está en varios artículos, cuenta para todos y la fila dice con
+cuántos más se comparte. También guarda la última publicación y si hay cambios
+guardados sin publicar. El Content Index Dashboard lo usa en las pestañas del
+Help Center y en "Due for yearly review".
+
+Script Properties: `CONTENTFUL_TOKEN` (obligatoria), `CONTENTFUL_SPACE`
+(por defecto zkjkphkd3oqx), `CONTENTFUL_ENV` (master) y `CONTENTFUL_ARTICLE_TYPES`
+(si no, todos los tipos cuyo id o nombre dice "article"). Corre `syncContentful`
+una vez y luego `setupContentfulTrigger` para que corra todos los días.

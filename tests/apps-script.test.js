@@ -52,6 +52,7 @@ function loadBackend(opts) {
     },
     Utilities: {
       formatDate(d, tz, fmt) {
+        if (!fmt) return '';
         if (fmt === 'MMM d') return d.toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric' });
         const p = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
           hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(d)
@@ -90,6 +91,8 @@ function loadBackend(opts) {
     MailApp: { sendEmail: (m) => mails.push(m) },
     Session: { getEffectiveUser: () => ({ getEmail: () => 'owner@example.com' }) },
     Logger: { log() {} },
+    UrlFetchApp: { fetch: (url, o) => { const r = (opts.fetch || (() => ({ code: 404, body: '{}' })))(url, o); return { getResponseCode: () => r.code || 200, getContentText: () => typeof r.body === 'string' ? r.body : JSON.stringify(r.body) }; } },
+    ScriptApp: { getProjectTriggers: () => [], deleteTrigger() {}, newTrigger: () => ({ timeBased: () => ({ everyDays: () => ({ atHour: () => ({ create() {} }) }), onWeekDay: () => ({ atHour: () => ({ create() {} }) }) }) }), WeekDay: {} },
   };
   vm.createContext(sandbox);
   const code = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
@@ -415,13 +418,71 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.4.2');
+  assert.strictEqual(v.server, '2.5.0');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.4.2');
+  assert.strictEqual(bad.server, '2.5.0');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.4.2');
+  assert.strictEqual(get.server, '2.5.0');
+});
+
+test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
+  const L = id => ({ sys: { type: 'Link', linkType: 'Entry', id } });
+  const U = id => ({ sys: { type: 'Link', linkType: 'User', id } });
+  const ct = id => ({ sys: { type: 'Link', linkType: 'ContentType', id } });
+  const E = (id, type, fields, sys) => ({ sys: Object.assign({ id, contentType: ct(type), version: 5, publishedVersion: 4 }, sys), fields });
+  const entries = [
+    E('a1', 'helpCenterArticle', { title: { 'en-US': 'Leads and opportunities', 'es-US': 'Prospectos y oportunidades' }, slug: { 'en-US': 'leads' },
+      sections: { 'en-US': [L('s1'), L('s2')] }, related: { 'en-US': [L('a2')] } },
+      { updatedAt: '2026-09-01T10:00:00Z', updatedBy: U('u1'), publishedAt: '2026-09-01T10:00:00Z', publishedBy: U('u1') }),
+    E('s1', 'section', { title: { 'en-US': 'How leads work' }, items: { 'en-US': [L('i1')] } }, { updatedAt: '2026-08-01T10:00:00Z', updatedBy: U('u1'), publishedAt: '2026-08-01T10:00:00Z', publishedBy: U('u1') }),
+    // accordion item shared by both articles, changed last, saved but not published
+    E('i1', 'accordionItem', { question: { 'en-US': 'Why was I charged?' } }, { updatedAt: '2026-10-10T10:00:00Z', updatedBy: U('u2'), publishedAt: '2026-10-01T10:00:00Z', publishedBy: U('u2'), version: 9, publishedVersion: 7 }),
+    E('s2', 'section', { body: { 'en-US': { nodeType: 'document', content: [{ nodeType: 'embedded-entry-block', data: { target: L('i2') } }] } } }, { updatedAt: '2026-07-01T10:00:00Z', updatedBy: U('u1') }),
+    E('i2', 'accordionItem', { question: { 'en-US': 'In rich text' } }, { updatedAt: '2026-07-02T10:00:00Z', updatedBy: U('u1') }),
+    E('a2', 'helpCenterArticle', { title: { 'en-US': 'Refunds' }, sections: { 'en-US': [L('i1')] } }, { updatedAt: '2025-01-01T10:00:00Z', updatedBy: U('u1'), publishedAt: '2025-01-01T10:00:00Z', publishedBy: U('u1') }),
+    E('a3', 'helpCenterArticle', { title: { 'en-US': 'Old one' } }, { updatedAt: '2024-01-01T10:00:00Z', updatedBy: U('u3'), publishedAt: '2024-01-01T10:00:00Z', publishedBy: U('u3') }),
+  ];
+  const pages = {
+    '/content_types': [{ sys: { id: 'helpCenterArticle' }, name: 'Help Center Article' }, { sys: { id: 'section' }, name: 'Section' }, { sys: { id: 'accordionItem' }, name: 'Accordion item' }],
+    '/locales': [{ code: 'en-US' }, { code: 'es-US' }, { code: 'pt-BR' }],
+    '/entries': entries,
+    '/users': [{ sys: { id: 'u1' }, firstName: 'Ana', lastName: 'Writer' }, { sys: { id: 'u2' }, firstName: 'Nichole', lastName: 'Jensen' }],
+  };
+  const urls = [];
+  const fetch = (url, o) => {
+    urls.push([url, o.method, o.headers.Authorization]);
+    const path = url.replace('https://api.contentful.com', '').split('?')[0];
+    const key = Object.keys(pages).find(k => path.endsWith(k));
+    const items = key ? pages[key] : [];
+    return { body: { items, total: items.length } };
+  };
+  const { g, sheets } = loadBackend({ fetch, props: { CONTENTFUL_TOKEN: 'tok' } });
+  const msg = g.syncContentful();
+  assert.ok(/3 articles/.test(msg), msg);
+  assert.ok(urls.every(u => u[1] === 'get' && u[2] === 'Bearer tok'), 'read only, with the token');
+  assert.ok(urls.some(u => /\/spaces\/zkjkphkd3oqx\/environments\/master\/entries\?limit=1000&skip=0/.test(u[0])));
+  const tab = sheets.hc_contentful.data(), h = tab[0];
+  const row = t => tab.find(x => x[h.indexOf('titleEN')] === t);
+  const col = (r, c) => r[h.indexOf(c)];
+  const a1 = row('Leads and opportunities');
+  assert.strictEqual(col(a1, 'titleES'), 'Prospectos y oportunidades');
+  assert.strictEqual(col(a1, 'lastUpdated'), '2026-10-10T10:00:00Z', 'the newest change is in a segment');
+  assert.strictEqual(col(a1, 'lastUpdatedBy'), 'Nichole Jensen');
+  assert.strictEqual(col(a1, 'changedIn'), 'Accordion item: Why was I charged?');
+  assert.strictEqual(col(a1, 'sharedWith'), 1, 'that item is also in Refunds');
+  assert.strictEqual(col(a1, 'unpublishedChanges'), 'yes');
+  assert.strictEqual(col(a1, 'segments'), 4, 'sections, items and rich-text embeds, not the related article');
+  assert.strictEqual(col(a1, 'lastPublished'), '2026-10-01T10:00:00Z');
+  const a2 = row('Refunds');
+  assert.strictEqual(col(a2, 'lastUpdated'), '2026-10-10T10:00:00Z', 'a shared segment counts for every article that has it');
+  assert.strictEqual(col(row('Old one'), 'lastUpdatedBy'), 'Unknown user (u3)');
+  assert.strictEqual(tab[1][h.indexOf('titleEN')], 'Leads and opportunities', 'newest first');
+  assert.ok(/app\.contentful\.com\/spaces\/zkjkphkd3oqx\/environments\/master\/entries\/a1/.test(col(a1, 'contentfulUrl')));
+  // no token: clear message
+  const nt = loadBackend({ fetch, props: {} });
+  assert.throws(() => nt.g.syncContentful(), /CONTENTFUL_TOKEN/);
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');

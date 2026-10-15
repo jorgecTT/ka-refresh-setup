@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.4.2)
+ * KA Sync v2 — Google Apps Script backend (v2.5.0)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,11 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.5.0 (Contentful)
+ *   - NEW: syncContentful() (daily, setupContentfulTrigger) reads the Help
+ *     Center space (read only) and writes hc_contentful: when each article was
+ *     last changed in Contentful and by whom, counting its linked segments.
  *
  * v2.4.2 (diagnostics)
  *   - Every answer says which Code.gs is running ("server": "2.4.2"), and
@@ -97,7 +102,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.4.2';
+var CODE_VERSION = '2.5.0';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1172,6 +1177,187 @@ function _emailWeekly(week, by, result, sheetUrl, firstRun, noArchivedList, fmt)
       c.NEW + ' new, ' + c.ARCHIVED + ' archived',
     htmlBody: html,
   });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── CONTENTFUL: last update of each Help Center article ─────────────────────
+// Once a day (setupContentfulTrigger) syncContentful() reads the Help Center
+// space with the Content Management API (read only: GET calls) and writes one
+// row per article to the hc_contentful tab: when it was last changed and by
+// whom, counting the article AND every segment linked inside it (sections,
+// accordions, items...). A segment shared by several articles counts for all
+// of them. The Content Index Dashboard reads that tab.
+// Script Properties:
+//   CONTENTFUL_TOKEN          Content Management API token (required)
+//   CONTENTFUL_SPACE          space id (default zkjkphkd3oqx)
+//   CONTENTFUL_ENV            environment (default master)
+//   CONTENTFUL_ARTICLE_TYPES  content type ids of an article, comma-separated
+//                             (default: every type whose id or name says "article")
+// ═══════════════════════════════════════════════════════════════════════════
+
+var HC_CONTENTFUL_TAB = 'hc_contentful';
+var CF_DEFAULT_SPACE = 'zkjkphkd3oqx';
+
+function _cfGet(path, token) {
+  var url = 'https://api.contentful.com' + path;
+  for (var attempt = 0; attempt < 4; attempt++) {
+    var resp = UrlFetchApp.fetch(url, { method: 'get', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + token } });
+    var code = resp.getResponseCode();
+    if (code === 429) { Utilities.sleep(1000 * (attempt + 1)); continue; }
+    if (code < 200 || code >= 300) throw new Error('Contentful answered HTTP ' + code + ' for ' + path.split('?')[0]);
+    return JSON.parse(resp.getContentText());
+  }
+  throw new Error('Contentful kept saying "too many requests"');
+}
+
+// Every item of a CMA collection (pages of 1000).
+function _cfAll(path, token) {
+  var out = [], skip = 0, sep = path.indexOf('?') === -1 ? '?' : '&';
+  for (var guard = 0; guard < 200; guard++) {
+    var page = _cfGet(path + sep + 'limit=1000&skip=' + skip, token);
+    var items = page.items || [];
+    out = out.concat(items);
+    skip += items.length;
+    if (!items.length || skip >= (page.total || 0)) break;
+  }
+  return out;
+}
+
+// The entries an entry links to (in any field, any locale, rich text included).
+function _cfLinks(entry) {
+  var ids = [];
+  (function walk(v) {
+    if (!v || typeof v !== 'object') return;
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (v.sys && v.sys.type === 'Link' && v.sys.linkType === 'Entry' && v.sys.id) { ids.push(v.sys.id); return; }
+    Object.keys(v).forEach(function (k) { walk(v[k]); });
+  })(entry.fields || {});
+  return ids;
+}
+
+// The value of a field in the locale that starts with lang ("en", "es", "pt").
+function _cfText(entry, names, locales, lang) {
+  var f = entry.fields || {};
+  for (var i = 0; i < names.length; i++) {
+    var byLoc = f[names[i]];
+    if (!byLoc || typeof byLoc !== 'object') continue;
+    for (var j = 0; j < locales.length; j++) {
+      if (locales[j].toLowerCase().indexOf(lang) === 0 && typeof byLoc[locales[j]] === 'string' && byLoc[locales[j]].trim()) return byLoc[locales[j]].trim();
+    }
+  }
+  return '';
+}
+
+/**
+ * Pure (no Google services), so it can be tested offline.
+ *   entries:  CMA entries (sys + fields)
+ *   types:    { contentTypeId: name }
+ *   users:    { userId: name }
+ *   locales:  ['en-US', 'es-US', ...]
+ *   articleTypes: content type ids that are an article
+ * Returns one row object per article.
+ */
+function contentfulArticleRows(entries, types, users, locales, articleTypes) {
+  var byId = {}, isArticle = {}, usedBy = {};
+  articleTypes.forEach(function (t) { isArticle[t] = true; });
+  entries.forEach(function (e) { byId[e.sys.id] = e; });
+  var typeOf = function (e) { return e.sys.contentType && e.sys.contentType.sys ? e.sys.contentType.sys.id : ''; };
+  var who = function (link) { var id = link && link.sys ? link.sys.id : ''; return id ? (users[id] || 'Unknown user (' + id + ')') : ''; };
+  var nameOf = function (e) {
+    var t = _cfText(e, ['internalName', 'name', 'title', 'heading', 'label', 'question'], locales, 'en') ||
+      _cfText(e, ['internalName', 'name', 'title', 'heading', 'label', 'question'], locales, '');
+    return (types[typeOf(e)] || typeOf(e) || 'Segment') + (t ? ': ' + t.slice(0, 80) : '');
+  };
+  var articles = entries.filter(function (e) { return isArticle[typeOf(e)] && !e.sys.archivedAt; });
+  // segments of each article: everything linked inside it, without walking into other articles
+  var segsOf = {};
+  articles.forEach(function (a) {
+    var seen = {}, list = [], queue = _cfLinks(a).map(function (id) { return { id: id, d: 1 }; });
+    while (queue.length) {
+      var q = queue.shift();
+      if (seen[q.id] || q.d > 6) continue;
+      seen[q.id] = true;
+      var e = byId[q.id];
+      if (!e || isArticle[typeOf(e)] || e.sys.archivedAt) continue;
+      list.push(e);
+      (usedBy[e.sys.id] = usedBy[e.sys.id] || {})[a.sys.id] = true;
+      _cfLinks(e).forEach(function (id) { queue.push({ id: id, d: q.d + 1 }); });
+    }
+    segsOf[a.sys.id] = list;
+  });
+  var ms = function (iso) { var t = iso ? Date.parse(iso) : NaN; return isNaN(t) ? 0 : t; };
+  return articles.map(function (a) {
+    var parts = [a].concat(segsOf[a.sys.id]);
+    var upd = parts[0], pub = null, unpublished = false;
+    parts.forEach(function (e) {
+      if (ms(e.sys.updatedAt) > ms(upd.sys.updatedAt)) upd = e;
+      if (e.sys.publishedAt && (!pub || ms(e.sys.publishedAt) > ms(pub.sys.publishedAt))) pub = e;
+      // a draft saved after the last publish: version is more than publishedVersion + 1
+      if (e.sys.publishedVersion != null && e.sys.version > e.sys.publishedVersion + 1) unpublished = true;
+      if (e.sys.publishedVersion == null && e === a) unpublished = true;
+    });
+    var shared = upd === a ? 0 : Object.keys(usedBy[upd.sys.id] || {}).length - 1;
+    return {
+      entryId: a.sys.id, contentType: types[typeOf(a)] || typeOf(a),
+      titleEN: _cfText(a, ['title', 'name', 'internalName'], locales, 'en'),
+      titleES: _cfText(a, ['title', 'name'], locales, 'es'),
+      titlePT: _cfText(a, ['title', 'name'], locales, 'pt'),
+      slug: _cfText(a, ['slug', 'urlSlug', 'url'], locales, 'en'),
+      lastUpdated: upd.sys.updatedAt || '', lastUpdatedBy: who(upd.sys.updatedBy),
+      changedIn: upd === a ? 'The article' : nameOf(upd), sharedWith: shared,
+      lastPublished: pub ? pub.sys.publishedAt : '', lastPublishedBy: pub ? who(pub.sys.publishedBy) : '',
+      unpublishedChanges: unpublished, segments: segsOf[a.sys.id].length,
+    };
+  }).sort(function (x, y) { return ms(y.lastUpdated) - ms(x.lastUpdated); });
+}
+
+function syncContentful() {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('CONTENTFUL_TOKEN');
+  if (!token) throw new Error('Set the Script Property CONTENTFUL_TOKEN (a Contentful Content Management API token) first.');
+  var space = props.getProperty('CONTENTFUL_SPACE') || CF_DEFAULT_SPACE;
+  var env = props.getProperty('CONTENTFUL_ENV') || 'master';
+  var base = '/spaces/' + space + '/environments/' + env;
+
+  var typeList = _cfAll(base + '/content_types', token);
+  var types = {};
+  typeList.forEach(function (t) { types[t.sys.id] = t.name || t.sys.id; });
+  var wanted = (props.getProperty('CONTENTFUL_ARTICLE_TYPES') || '').split(',').map(function (x) { return x.trim(); }).filter(String);
+  var articleTypes = wanted.length ? wanted : typeList.filter(function (t) { return /article/i.test(t.sys.id + ' ' + (t.name || '')); })
+    .map(function (t) { return t.sys.id; });
+  if (!articleTypes.length) throw new Error('No content type looks like an article. Set CONTENTFUL_ARTICLE_TYPES. Types: ' + Object.keys(types).join(', '));
+  var locales = _cfAll(base + '/locales', token).map(function (l) { return l.code; });
+  var entries = _cfAll(base + '/entries', token);
+  var users = {};
+  try {
+    _cfAll('/spaces/' + space + '/users', token).forEach(function (u) {
+      users[u.sys.id] = ((u.firstName || '') + ' ' + (u.lastName || '')).trim() || u.email || u.sys.id;
+    });
+  } catch (e) { /* names are nice to have: ids stay */ }
+
+  var rows = contentfulArticleRows(entries, types, users, locales, articleTypes);
+  var now = Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm');
+  var appUrl = 'https://app.contentful.com/spaces/' + space + '/environments/' + env + '/entries/';
+  var header = ['entryId', 'contentType', 'titleEN', 'titleES', 'titlePT', 'slug', 'lastUpdated', 'lastUpdatedBy', 'changedIn',
+    'sharedWith', 'lastPublished', 'lastPublishedBy', 'unpublishedChanges', 'segments', 'contentfulUrl', 'syncedAt'];
+  var data = rows.map(function (r) {
+    return [r.entryId, r.contentType, r.titleEN, r.titleES, r.titlePT, r.slug, r.lastUpdated, r.lastUpdatedBy, r.changedIn,
+      r.sharedWith, r.lastPublished, r.lastPublishedBy, r.unpublishedChanges ? 'yes' : 'no', r.segments, appUrl + r.entryId, now];
+  });
+  _writeTab(SpreadsheetApp.openById(CORPUS_SHEET_ID), HC_CONTENTFUL_TAB, header, data);
+  var msg = rows.length + ' articles (' + articleTypes.join(', ') + ') from ' + entries.length + ' entries';
+  Logger.log(msg);
+  return msg;
+}
+
+/** Run once: syncContentful every day around 6am (script time zone). */
+function setupContentfulTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'syncContentful') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('syncContentful').timeBased().everyDays(1).atHour(6).create();
+  return 'syncContentful daily trigger set (about 6am, script time zone)';
 }
 
 /**
