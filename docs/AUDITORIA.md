@@ -107,3 +107,12 @@ una vez y luego `setupContentfulTrigger` para que corra todos los días.
 - 2.7.2: después de crear el Doc le pide al Auto Sync un sync de todo (`action: 'run_manual'`). El Auto Sync necesita la adición de `tools/autosync-run-manual.gs` (dos pegadas en su doPost y al final). Si ya hay un sync corriendo, no arranca otro.
 - 2.7.3: el registro del botón pasa a la pestaña `hc_added` (la 2.7.0 dejó otro registro en `hc_created`, que se puede borrar).
 - 2.7.4: **Add it** responde al momento. El Doc lo pide un trigger en segundo plano (`autoSyncPending`), porque el Auto Sync tarda minutos (revisa todos los Docs antes de crear uno). Después pide un sync de todo.
+
+## Búsquedas y gaps de contenido (dashboard, Code.gs 2.7.5)
+
+- **Other names:** el dashboard busca con las palabras del título y con otros nombres del mismo tema: los `aliases` del corpus, los `concepts` que comparten una palabra con el título ("claimable jobs" para "preset jobs") y la pestaña `search_names` (`setupSearchNames()` la crea). Los demás concepts se usan solo en Linear, como temas relacionados.
+- **Linear:** una búsqueda por cada nombre, más el URL Name del KA y el slug del Help Center. Puntos extra a tickets que dicen otro nombre en el título y a tickets del equipo de contenido.
+- **Enterpret:** comentarios con todas las palabras del título **o** cualquier otro nombre.
+- **Slack:** una búsqueda por el título y hasta 2 otros nombres, juntas.
+- **Find gaps:** temas, sentimiento y los 50 comentarios más recientes, más el texto del artículo (`fullText`), los lee Claude (capability `sample`) y lista gaps, contradicciones y lo que ya está cubierto.
+- **Customer feedback → Topics without an article:** los 40 temas de Enterpret con más comentarios (sin MISC). Claude los compara con los títulos y concepts del corpus (inglés) y marca Covered, Partly o No article.

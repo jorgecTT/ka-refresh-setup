@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.7.4)
+ * KA Sync v2 — Google Apps Script backend (v2.7.5)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.7.5
+ *   - setupSearchNames(): creates the search_names tab (other names for the same
+ *     thing) that the dashboard searches with.
  *
  * v2.7.4 (Contentful)
  *   - "Add it" answers right away: Auto Sync creates the Doc from a background
@@ -134,7 +138,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.7.4';
+var CODE_VERSION = '2.7.5';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1434,6 +1438,24 @@ function setupContentfulTrigger() {
   });
   ScriptApp.newTrigger('syncContentful').timeBased().everyDays(1).atHour(6).create();
   return 'syncContentful daily trigger set (about 6am, script time zone)';
+}
+
+/**
+ * Run once: creates the search_names tab in the corpus sheet. Each row is a
+ * list of names for the same thing (comma-separated). When an article's title
+ * or concepts use one of them, the dashboard searches Linear, Enterpret and
+ * Slack with all of them. Never touches the tab if it is already there.
+ */
+var SEARCH_NAMES_TAB = 'search_names';
+function setupSearchNames() {
+  var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID);
+  if (ss.getSheetByName(SEARCH_NAMES_TAB)) return 'search_names already exists: nothing changed';
+  var sh = ss.insertSheet(SEARCH_NAMES_TAB);
+  sh.appendRow(['names', 'notes']);
+  sh.appendRow(['preset jobs, claimable jobs, TToD', 'Preset Jobs used to be called claimable jobs; TToD in Linear']);
+  sh.appendRow(['preset service calls, claimable service calls', '']);
+  sh.setFrozenRows(1);
+  return 'search_names created with 2 example rows: add your own';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

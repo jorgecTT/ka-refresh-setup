@@ -424,13 +424,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.7.4');
+  assert.strictEqual(v.server, '2.7.5');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.7.4');
+  assert.strictEqual(bad.server, '2.7.5');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.7.4');
+  assert.strictEqual(get.server, '2.7.5');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -584,6 +584,16 @@ test('Create Doc from Contentful: adds the article to the Auto Sync list (once);
   // an old Auto Sync without "run_manual" says so instead of failing
   const old = loadBackend({ props: { CONTENTFUL_TOKEN: 't', AUTO_SYNC_URL: 'u', AUTO_SYNC_SECRET: 's' }, fetch: () => ({ body: { ok: false, code: 'BAD_REQUEST', error: 'Missing url' } }) });
   assert.ok(/does not have the "run_manual" addition yet/.test(old.g._autoSyncRunAll()));
+});
+
+test('setupSearchNames creates the search_names tab once', () => {
+  const { g, sheets } = loadBackend({});
+  assert.ok(/created/.test(g.setupSearchNames()));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(sheets.search_names.data()[0])), ['names', 'notes']);
+  assert.ok(/claimable jobs/.test(sheets.search_names.data()[1][0]));
+  sheets.search_names.appendRow(['x, y', '']);
+  assert.ok(/already exists/.test(g.setupSearchNames()));
+  assert.strictEqual(sheets.search_names.data().length, 4, 'never touched again');
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');
