@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.7.3)
+ * KA Sync v2 — Google Apps Script backend (v2.7.4)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.7.4 (Contentful)
+ *   - "Add it" answers right away: Auto Sync creates the Doc from a background
+ *     trigger (autoSyncPending), since it takes minutes, then runs a full sync.
  *
  * v2.7.3 (Contentful)
  *   - The log of the Create Doc button is now the hc_added tab (2.7.0 left a
@@ -130,7 +134,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.7.3';
+var CODE_VERSION = '2.7.4';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1574,25 +1578,62 @@ function createDocFromContentful(entryId, go) {
         var again = sh.getDataRange().getValues().some(function (r, k) { return k > 0 && _normHcUrl(r[0]) === _normHcUrl(url); });
         if (!again) { sh.appendRow([url, '', 'Added by Content Index Dashboard' + (by ? ' (' + by + ')' : '') + ' — waiting for Auto Sync', '', '']); added = true; }
       }
-      var made = null;
-      try { made = _autoSyncCreate(url, by); } catch (err) { made = { ok: false, error: String(err && err.message || err) }; }
-      if (made && made.ok) {
-        _logCreated(entryId, url, made.exists ? 'already had a Doc' : 'Doc created', made.docUrl, by);
-        var all = _autoSyncRunAll();
-        return Object.assign(base, { created: !made.exists, exists: !!made.exists, docUrl: made.docUrl, fullSync: all,
-          message: made.exists ? 'Auto Sync already had a Doc for this article.' : 'Auto Sync created the Doc. The corpus picks it up on its next run.' });
+      // Auto Sync takes minutes to create a Doc (it checks every Doc for a
+      // duplicate first), so ask it from a background trigger and answer now.
+      if (canNow) {
+        var pend = JSON.parse(props.getProperty('CI_PENDING') || '[]');
+        if (!pend.some(function (x) { return x.url === url; })) pend.push({ entryId: entryId, url: url, by: by });
+        props.setProperty('CI_PENDING', JSON.stringify(pend));
+        _scheduleAutoSyncPending();
+        _logCreated(entryId, url, 'Auto Sync is creating the Doc', '', by);
+        return Object.assign(base, { queued: true, added: added, working: true,
+          message: (added ? 'Added to the Auto Sync list.' : 'It was already on the Auto Sync list.') +
+            ' Auto Sync is creating the Doc now, in the background (about 2 to 6 minutes), and then runs a full sync of all articles.' });
       }
       _logCreated(entryId, url, 'on the Auto Sync list', '', by);
-      // a full sync also creates the Doc (a listed URL with no hash gets one)
-      var allQ = made ? _autoSyncRunAll() : '';
-      return Object.assign(base, { queued: true, added: added, fullSync: allQ,
+      return Object.assign(base, { queued: true, added: added,
         message: (added ? 'Added to the Auto Sync list.' : 'It was already on the Auto Sync list.') +
-          ' Auto Sync creates the Doc on its next run (weeknights, 2am UTC) and keeps it updated after that.' +
-          (made && !made.ok ? ' (Creating it right away did not work: ' + made.error + ')' : '') });
+          ' Auto Sync creates the Doc on its next run (weeknights, 2am UTC) and keeps it updated after that.' });
     } finally { lock.releaseLock(); }
   } catch (err) {
     return { ok: false, message: String(err && err.message || err) };
   }
+}
+
+function _scheduleAutoSyncPending() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'autoSyncPending') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('autoSyncPending').timeBased().after(1000).create();
+}
+
+/**
+ * Background step of "+ Create Doc" (runs from a trigger a second later):
+ * asks Auto Sync to create each waiting Doc, logs the result in hc_added,
+ * then asks Auto Sync for one full sync.
+ */
+function autoSyncPending() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return 'busy';
+  var props = PropertiesService.getScriptProperties();
+  try {
+    ScriptApp.getProjectTriggers().forEach(function (t) {
+      if (t.getHandlerFunction() === 'autoSyncPending') ScriptApp.deleteTrigger(t);
+    });
+    var pend = JSON.parse(props.getProperty('CI_PENDING') || '[]');
+    props.deleteProperty('CI_PENDING');
+    if (!pend.length) return 'nothing to do';
+    pend.forEach(function (x) {
+      var made;
+      try { made = _autoSyncCreate(x.url, x.by) || { ok: false, error: 'AUTO_SYNC_URL / AUTO_SYNC_SECRET not set' }; }
+      catch (e) { made = { ok: false, error: String(e && e.message || e) }; }
+      _logCreated(x.entryId, x.url, made.ok ? (made.exists ? 'already had a Doc' : 'Doc created')
+        : 'create failed: ' + made.error + ' (Auto Sync makes it on its next run)', made.docUrl || '', x.by);
+    });
+    var all = _autoSyncRunAll();
+    Logger.log(all);
+    return pend.length + ' done. ' + all;
+  } finally { lock.releaseLock(); }
 }
 
 function _createPage(r, entryId) {
@@ -1606,14 +1647,16 @@ function _createPage(r, entryId) {
   if (!r.ok) body = '<h1 class="bad">Could not add it</h1>' + head + '<p>' + _esc(r.message) + '</p><p class="muted">Close this tab and try again, or tell Claude what it says.</p>';
   else if (r.created) body = '<h1 class="ok">✓ Doc created</h1>' + head + '<p>' + _esc(r.message) + '</p>' + (r.fullSync ? '<p>' + _esc(r.fullSync) + '</p>' : '') + open;
   else if (r.exists) body = '<h1 class="ok">Already in the Content Index</h1>' + head + '<p>' + _esc(r.message) + '</p>' + (r.fullSync ? '<p>' + _esc(r.fullSync) + '</p>' : '') + open;
-  else if (r.queued) body = '<h1 class="ok">✓ On the Auto Sync list</h1>' + head + '<p>' + _esc(r.message) + '</p>' + (r.fullSync ? '<p>' + _esc(r.fullSync) + '</p>' : '') + '<p class="muted">You can close this tab.</p>';
+  else if (r.queued) body = '<h1 class="ok">✓ On the Auto Sync list</h1>' + head + '<p>' + _esc(r.message) + '</p>' +
+    '<p class="muted">You can close this tab. In the dashboard, click Refresh data in a few minutes: the row changes to Open Doc.</p>';
   else {
     body = '<h1>Add this article to the Content Index?</h1>' + head +
       '<p>' + (r.listed ? 'It is already on the Auto Sync list but has no Doc yet.' : 'This adds its Help Center URL to the HC Auto Sync list.') + ' ' +
       (r.now ? 'Then Auto Sync creates the Doc right away and starts a full sync of all articles,' : 'Auto Sync creates the Doc on its next run (weeknights, 2am UTC),') +
       ' in the same format as every other Help Center Doc, and keeps it updated after that.</p>' +
       '<p class="muted">Nothing changes in Contentful. Auto Sync never makes a second Doc for the same article.</p>' +
-      '<a class="btn" href="' + _esc(ScriptApp.getService().getUrl() + '?create=contentful&id=' + encodeURIComponent(entryId) + '&go=1') + '" target="_top">Add it</a>';
+      '<a class="btn" id="go" href="' + _esc(ScriptApp.getService().getUrl() + '?create=contentful&id=' + encodeURIComponent(entryId) + '&go=1') + '" target="_top"' +
+      ' onclick="this.textContent=\'Adding…\';this.style.opacity=.6;this.style.pointerEvents=\'none\'">Add it</a>';
   }
   return '<!DOCTYPE html><html><head><meta charset="utf-8">' + css + '</head><body><div class="c">' + body + '</div></body></html>';
 }

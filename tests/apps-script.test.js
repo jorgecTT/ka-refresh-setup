@@ -45,7 +45,7 @@ function loadBackend(opts) {
 
   const sandbox = {
     console,
-    PropertiesService: { getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null) }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: k => (k in props ? props[k] : null), setProperty: (k, v) => { props[k] = String(v); }, deleteProperty: k => { delete props[k]; } }) },
     ContentService: {
       MimeType: { JSON: 'json' },
       createTextOutput: (t) => ({ text: t, setMimeType() { return this; } }),
@@ -98,7 +98,7 @@ function loadBackend(opts) {
     LockService: { getScriptLock: () => ({ tryLock: () => !opts.locked, releaseLock() {} }) },
     HtmlService: { createHtmlOutput: h => ({ html: h, setTitle() { return this; }, addMetaTag() { return this; } }) },
     UrlFetchApp: { fetch: (url, o) => { const r = (opts.fetch || (() => ({ code: 404, body: '{}' })))(url, o); return { getResponseCode: () => r.code || 200, getContentText: () => typeof r.body === 'string' ? r.body : JSON.stringify(r.body) }; } },
-    ScriptApp: { getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/X/exec' }), getProjectTriggers: () => [], deleteTrigger() {}, newTrigger: () => ({ timeBased: () => ({ everyDays: () => ({ atHour: () => ({ create() {} }) }), onWeekDay: () => ({ atHour: () => ({ create() {} }) }) }) }), WeekDay: {} },
+    ScriptApp: { getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/X/exec' }), getProjectTriggers: () => (sandbox.__trig = sandbox.__trig || []).slice(), deleteTrigger(t) { sandbox.__trig = sandbox.__trig.filter(x => x !== t); }, newTrigger: (h) => ({ timeBased: () => ({ everyDays: () => ({ atHour: () => ({ create() {} }) }), onWeekDay: () => ({ atHour: () => ({ create() {} }) }), after: () => ({ create() { (sandbox.__trig = sandbox.__trig || []).push({ getHandlerFunction: () => h }); } }) }) }), WeekDay: {} },
   };
   vm.createContext(sandbox);
   const code = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
@@ -424,13 +424,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.7.3');
+  assert.strictEqual(v.server, '2.7.4');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.7.3');
+  assert.strictEqual(bad.server, '2.7.4');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.7.3');
+  assert.strictEqual(get.server, '2.7.4');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -565,12 +565,20 @@ test('Create Doc from Contentful: adds the article to the Auto Sync list (once);
   B.g.SpreadsheetApp.openById('x').insertSheet('Articles'); seed(B.sheets);
   assert.ok(/Auto Sync creates the Doc right away/.test(B.g.doGet({ parameter: { create: 'contentful', id: 'pol' } }).html));
   const now = B.g.doGet({ parameter: { create: 'contentful', id: 'pol', go: '1' } }).html;
-  assert.ok(/Doc created/.test(now) && /document\/d\/new1\/edit/.test(now), now);
-  assert.ok(/started a full sync of all articles/.test(now), 'and starts a full Auto Sync');
+  assert.ok(/On the Auto Sync list/.test(now) && /creating the Doc now, in the background/.test(now), now);
+  assert.strictEqual(posts.length, 0, 'answers right away: Auto Sync is called from a trigger');
+  assert.deepStrictEqual(B.g.__trig.map(t => t.getHandlerFunction()), ['autoSyncPending']);
+  assert.strictEqual(B.sheets.Articles.data().length, 3, 'on the list, so Auto Sync keeps it updated');
+  // the trigger fires: create, then one full sync
+  const out = B.g.autoSyncPending();
+  assert.ok(/1 done/.test(out) && /started a full sync of all articles/.test(out), out);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), { mode: 'create', url: 'https://help.thumbtack.com/article/politica-de-trabajos-preestablecidos', reviewer: 'Content Index Dashboard', secret: 's3' });
   assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[1])), { action: 'run_manual', secret: 's3' });
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), { secret: 's3', mode: 'create', url: 'https://help.thumbtack.com/article/politica-de-trabajos-preestablecidos', reviewer: 'Content Index Dashboard' });
-  assert.strictEqual(B.sheets.Articles.data().length, 3, 'on the list too, so Auto Sync keeps it updated');
-  assert.strictEqual(B.sheets.hc_added.data()[1][2], 'Doc created');
+  const log = B.sheets.hc_added.data();
+  assert.strictEqual(log[1][2], 'Auto Sync is creating the Doc');
+  assert.deepStrictEqual([log[2][2], log[2][3]], ['Doc created', 'https://docs.google.com/document/d/new1/edit']);
+  assert.strictEqual(B.g.__trig.length, 0, 'its trigger is gone');
+  assert.strictEqual(B.g.autoSyncPending(), 'nothing to do');
   const have2 = B.g.doGet({ parameter: { create: 'contentful', id: 'have', go: '1' } }).html;
   assert.ok(/Already in the Content Index/.test(have2) && !/full sync/.test(have2), 'nothing to do: no full sync');
   // an old Auto Sync without "run_manual" says so instead of failing

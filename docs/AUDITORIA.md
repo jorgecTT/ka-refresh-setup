@@ -106,3 +106,4 @@ una vez y luego `setupContentfulTrigger` para que corra todos los días.
 - `hc_contentful` tiene una columna nueva, `internalName`, para emparejar el español con su inglés ("Preset Jobs policy [Spanish]").
 - 2.7.2: después de crear el Doc le pide al Auto Sync un sync de todo (`action: 'run_manual'`). El Auto Sync necesita la adición de `tools/autosync-run-manual.gs` (dos pegadas en su doPost y al final). Si ya hay un sync corriendo, no arranca otro.
 - 2.7.3: el registro del botón pasa a la pestaña `hc_added` (la 2.7.0 dejó otro registro en `hc_created`, que se puede borrar).
+- 2.7.4: **Add it** responde al momento. El Doc lo pide un trigger en segundo plano (`autoSyncPending`), porque el Auto Sync tarda minutos (revisa todos los Docs antes de crear uno). Después pide un sync de todo.
