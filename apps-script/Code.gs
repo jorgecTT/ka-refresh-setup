@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.7.2)
+ * KA Sync v2 — Google Apps Script backend (v2.7.3)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -27,6 +27,11 @@
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
  *
+ * v2.7.3 (Contentful)
+ *   - The log of the Create Doc button is now the hc_added tab (2.7.0 left a
+ *     different log in hc_created, which made the dashboard show an article
+ *     as on the Auto Sync list when it was not).
+ *
  * v2.7.2 (Contentful)
  *   - After Auto Sync creates the Doc, it also asks Auto Sync to start a full
  *     sync of every article (action 'run_manual': needs the small addition in
@@ -39,7 +44,7 @@
  *     its own format) and keeps it updated. With AUTO_SYNC_URL and
  *     AUTO_SYNC_SECRET set, it also asks Auto Sync to create it right away.
  *     Shows what it will do first; acts only on "Add it" (&go=1). Logged in
- *     the hc_created tab. hc_contentful gets an internalName column.
+ *     the hc_added tab. hc_contentful gets an internalName column.
  *
  * v2.6.0 (Contentful)
  *   - <web app URL>?refresh=contentful reads Contentful right away (the
@@ -125,7 +130,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.7.2';
+var CODE_VERSION = '2.7.3';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1449,7 +1454,8 @@ function setupContentfulTrigger() {
 
 var AUTO_SYNC_SHEET_DEFAULT = '1_Ei7R5-BgWBiYySa0dxNS-fYq3ppTj9jlbofMKLYVOM';
 var AUTO_SYNC_TAB = 'Articles';
-var HC_CREATED_TAB = 'hc_created';
+// (2.7.0 wrote a different log to 'hc_created'; this one is new so the two never mix)
+var HC_CREATED_TAB = 'hc_added';
 var HC_ARTICLE_URL = 'https://help.thumbtack.com/article/';
 
 // A field's value in en-US (where this space keeps it), else any locale.

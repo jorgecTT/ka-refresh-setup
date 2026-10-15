@@ -424,13 +424,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.7.2');
+  assert.strictEqual(v.server, '2.7.3');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.7.2');
+  assert.strictEqual(bad.server, '2.7.3');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.7.2');
+  assert.strictEqual(get.server, '2.7.3');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -549,8 +549,8 @@ test('Create Doc from Contentful: adds the article to the Auto Sync list (once);
   assert.ok(/Added by Content Index Dashboard/.test(rows[2][2]));
   const again = B.g.doGet({ parameter: { create: 'contentful', id: 'pol', go: '1' } }).html;
   assert.ok(/already on the Auto Sync list/.test(again) && B.sheets.Articles.data().length === 3, 'never added twice');
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(B.sheets.hc_created.data()[0])), ['entryId', 'url', 'status', 'docUrl', 'at', 'by']);
-  assert.strictEqual(B.sheets.hc_created.data()[1][2], 'on the Auto Sync list');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(B.sheets.hc_added.data()[0])), ['entryId', 'url', 'status', 'docUrl', 'at', 'by']);
+  assert.strictEqual(B.sheets.hc_added.data()[1][2], 'on the Auto Sync list');
   // already listed with a Doc (URL written differently): links to it, adds nothing
   const have = B.g.doGet({ parameter: { create: 'contentful', id: 'have', go: '1' } }).html;
   assert.ok(/Already in the Content Index/.test(have) && /document\/d\/docQT\/edit/.test(have), have);
@@ -570,7 +570,7 @@ test('Create Doc from Contentful: adds the article to the Auto Sync list (once);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[1])), { action: 'run_manual', secret: 's3' });
   assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), { secret: 's3', mode: 'create', url: 'https://help.thumbtack.com/article/politica-de-trabajos-preestablecidos', reviewer: 'Content Index Dashboard' });
   assert.strictEqual(B.sheets.Articles.data().length, 3, 'on the list too, so Auto Sync keeps it updated');
-  assert.strictEqual(B.sheets.hc_created.data()[1][2], 'Doc created');
+  assert.strictEqual(B.sheets.hc_added.data()[1][2], 'Doc created');
   const have2 = B.g.doGet({ parameter: { create: 'contentful', id: 'have', go: '1' } }).html;
   assert.ok(/Already in the Content Index/.test(have2) && !/full sync/.test(have2), 'nothing to do: no full sync');
   // an old Auto Sync without "run_manual" says so instead of failing
