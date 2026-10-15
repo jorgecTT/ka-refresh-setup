@@ -96,7 +96,7 @@ Script Properties: `CONTENTFUL_TOKEN` (obligatoria), `CONTENTFUL_SPACE`
 (si no, todos los tipos cuyo id o nombre dice "article"). Corre `syncContentful`
 una vez y luego `setupContentfulTrigger` para que corra todos los días.
 
-## Artículos de Contentful que no están en el Content Index (2.7.1)
+## Artículos de Contentful que no están en el Content Index (2.7.1 / 2.7.2)
 
 - Dashboard → Contentful Help Center → **Not indexed**: artículos de `hc_contentful` cuyo título (en cualquier idioma) no está en el corpus. Pruebas y sin título van aparte.
 - La causa normal: el artículo no está en la lista `Articles` del HC Auto Sync, que es quien crea y mantiene los Docs.
@@ -104,3 +104,4 @@ una vez y luego `setupContentfulTrigger` para que corra todos los días.
 - Con `AUTO_SYNC_URL` y `AUTO_SYNC_SECRET` en Script Properties, además le pide al Auto Sync que lo cree al momento (modo `create`, que no duplica por slug).
 - Solo artículos publicados. Cada acción queda en la pestaña `hc_created`. El dashboard lee la lista del Auto Sync para mostrar el estado.
 - `hc_contentful` tiene una columna nueva, `internalName`, para emparejar el español con su inglés ("Preset Jobs policy [Spanish]").
+- 2.7.2: después de crear el Doc le pide al Auto Sync un sync de todo (`action: 'run_manual'`). El Auto Sync necesita la adición de `tools/autosync-run-manual.gs` (dos pegadas en su doPost y al final). Si ya hay un sync corriendo, no arranca otro.

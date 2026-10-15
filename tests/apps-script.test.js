@@ -424,13 +424,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.7.1');
+  assert.strictEqual(v.server, '2.7.2');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.7.1');
+  assert.strictEqual(bad.server, '2.7.2');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.7.1');
+  assert.strictEqual(get.server, '2.7.2');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -524,6 +524,7 @@ test('Create Doc from Contentful: adds the article to the Auto Sync list (once);
   const posts = [];
   const fetch = (url, o) => {
     if (url === 'https://script.google.com/macros/s/AUTO/exec') { const b = JSON.parse(o.payload); posts.push(b);
+      if (b.action === 'run_manual') return { body: posts.filter(x => x.action === 'run_manual').length > 1 ? { ok: false, error: 'A sync is already running. Wait for it to finish.' } : { ok: true, message: 'Manual sync started.' } };
       return { body: b.url.endsWith('quote-templates') ? { ok: false, code: 'ALREADY_EXISTS', existingDocUrl: 'https://docs.google.com/document/d/old/edit' } : { ok: true, mode: 'create', docUrl: 'https://docs.google.com/document/d/new1/edit' } }; }
     const p = url.replace('https://api.contentful.com', '').split('?')[0];
     if (p.endsWith('/content_types')) return { body: { items: [{ sys: { id: 'helpCenterArticle' }, name: 'Article' }, { sys: { id: 'segment' }, name: 'Article > Segment' }], total: 2 } };
@@ -565,9 +566,16 @@ test('Create Doc from Contentful: adds the article to the Auto Sync list (once);
   assert.ok(/Auto Sync creates the Doc right away/.test(B.g.doGet({ parameter: { create: 'contentful', id: 'pol' } }).html));
   const now = B.g.doGet({ parameter: { create: 'contentful', id: 'pol', go: '1' } }).html;
   assert.ok(/Doc created/.test(now) && /document\/d\/new1\/edit/.test(now), now);
+  assert.ok(/started a full sync of all articles/.test(now), 'and starts a full Auto Sync');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[1])), { action: 'run_manual', secret: 's3' });
   assert.deepStrictEqual(JSON.parse(JSON.stringify(posts[0])), { secret: 's3', mode: 'create', url: 'https://help.thumbtack.com/article/politica-de-trabajos-preestablecidos', reviewer: 'Content Index Dashboard' });
   assert.strictEqual(B.sheets.Articles.data().length, 3, 'on the list too, so Auto Sync keeps it updated');
   assert.strictEqual(B.sheets.hc_created.data()[1][2], 'Doc created');
+  const have2 = B.g.doGet({ parameter: { create: 'contentful', id: 'have', go: '1' } }).html;
+  assert.ok(/Already in the Content Index/.test(have2) && !/full sync/.test(have2), 'nothing to do: no full sync');
+  // an old Auto Sync without "run_manual" says so instead of failing
+  const old = loadBackend({ props: { CONTENTFUL_TOKEN: 't', AUTO_SYNC_URL: 'u', AUTO_SYNC_SECRET: 's' }, fetch: () => ({ body: { ok: false, code: 'BAD_REQUEST', error: 'Missing url' } }) });
+  assert.ok(/does not have the "run_manual" addition yet/.test(old.g._autoSyncRunAll()));
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');

@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.7.1)
+ * KA Sync v2 — Google Apps Script backend (v2.7.2)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,11 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.7.2 (Contentful)
+ *   - After Auto Sync creates the Doc, it also asks Auto Sync to start a full
+ *     sync of every article (action 'run_manual': needs the small addition in
+ *     tools/autosync-run-manual.gs pasted into the Auto Sync project).
  *
  * v2.7.1 (Contentful)
  *   - <web app URL>?create=contentful&id=<entryId> puts an article in the
@@ -120,7 +125,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.7.1';
+var CODE_VERSION = '2.7.2';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1492,20 +1497,39 @@ function _logCreated(entryId, url, status, docUrl, by) {
   sh.appendRow([entryId, url, status, docUrl || '', Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm'), by || '']);
 }
 
-// Ask Auto Sync to create the Doc now. Returns { ok, docUrl, exists, error }.
-function _autoSyncCreate(url, by) {
+// POST to the Auto Sync web app. null when AUTO_SYNC_URL / AUTO_SYNC_SECRET are not set.
+function _autoSyncPost(body) {
   var props = PropertiesService.getScriptProperties();
   var app = props.getProperty('AUTO_SYNC_URL'), secret = props.getProperty('AUTO_SYNC_SECRET');
   if (!app || !secret) return null;
   var headers = {};
   try { headers.Authorization = 'Bearer ' + ScriptApp.getOAuthToken(); } catch (e) {}
-  var resp = UrlFetchApp.fetch(app, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers,
-    payload: JSON.stringify({ secret: secret, mode: 'create', url: url, reviewer: by ? 'Content Index Dashboard (' + by + ')' : 'Content Index Dashboard' }) });
-  var r;
-  try { r = JSON.parse(resp.getContentText()); } catch (e) { return { ok: false, error: 'Auto Sync answered HTTP ' + resp.getResponseCode() + ', not JSON (check AUTO_SYNC_URL)' }; }
+  body.secret = secret;
+  var resp = UrlFetchApp.fetch(app, { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: headers, payload: JSON.stringify(body) });
+  try { return JSON.parse(resp.getContentText()); } catch (e) { return { ok: false, code: 'NOT_JSON', error: 'Auto Sync answered HTTP ' + resp.getResponseCode() + ', not JSON (check AUTO_SYNC_URL)' }; }
+}
+
+// Ask Auto Sync to create the Doc now. Returns { ok, docUrl, exists, error }.
+function _autoSyncCreate(url, by) {
+  var r = _autoSyncPost({ mode: 'create', url: url, reviewer: by ? 'Content Index Dashboard (' + by + ')' : 'Content Index Dashboard' });
+  if (!r) return null;
+  if (r.code === 'NOT_JSON') return { ok: false, error: r.error };
   if (r.ok) return { ok: true, docUrl: r.docUrl || '' };
   if (r.code === 'ALREADY_EXISTS') return { ok: true, exists: true, docUrl: r.existingDocUrl || '' };
   return { ok: false, error: (r.code ? r.code + ': ' : '') + (r.error || 'unknown error') };
+}
+
+// Ask Auto Sync to start a full sync of every article on its list (it runs in
+// the background, in batches). Needs the small 'run_manual' addition to the
+// Auto Sync doPost (tools/autosync-run-manual.gs). Returns a sentence, or ''.
+function _autoSyncRunAll() {
+  var r;
+  try { r = _autoSyncPost({ action: 'run_manual' }); } catch (e) { return 'The full Auto Sync did not start: ' + (e && e.message || e) + '.'; }
+  if (!r) return '';
+  if (r.ok) return 'Auto Sync also started a full sync of all articles (a few minutes, in the background).';
+  if (/already running/i.test(r.error || '')) return 'A full Auto Sync was already running.';
+  if (r.code === 'BAD_REQUEST' || /missing url/i.test(r.error || '')) return 'The full Auto Sync did not start: Auto Sync does not have the "run_manual" addition yet (see the guide, Part 8).';
+  return 'The full Auto Sync did not start: ' + (r.error || 'unknown error') + '.';
 }
 
 /**
@@ -1548,11 +1572,14 @@ function createDocFromContentful(entryId, go) {
       try { made = _autoSyncCreate(url, by); } catch (err) { made = { ok: false, error: String(err && err.message || err) }; }
       if (made && made.ok) {
         _logCreated(entryId, url, made.exists ? 'already had a Doc' : 'Doc created', made.docUrl, by);
-        return Object.assign(base, { created: !made.exists, exists: !!made.exists, docUrl: made.docUrl,
+        var all = _autoSyncRunAll();
+        return Object.assign(base, { created: !made.exists, exists: !!made.exists, docUrl: made.docUrl, fullSync: all,
           message: made.exists ? 'Auto Sync already had a Doc for this article.' : 'Auto Sync created the Doc. The corpus picks it up on its next run.' });
       }
       _logCreated(entryId, url, 'on the Auto Sync list', '', by);
-      return Object.assign(base, { queued: true, added: added,
+      // a full sync also creates the Doc (a listed URL with no hash gets one)
+      var allQ = made ? _autoSyncRunAll() : '';
+      return Object.assign(base, { queued: true, added: added, fullSync: allQ,
         message: (added ? 'Added to the Auto Sync list.' : 'It was already on the Auto Sync list.') +
           ' Auto Sync creates the Doc on its next run (weeknights, 2am UTC) and keeps it updated after that.' +
           (made && !made.ok ? ' (Creating it right away did not work: ' + made.error + ')' : '') });
@@ -1571,13 +1598,13 @@ function _createPage(r, entryId) {
   var open = r.docUrl ? '<a class="btn" href="' + _esc(r.docUrl) + '" target="_blank">Open the Doc</a>' : '';
   var body;
   if (!r.ok) body = '<h1 class="bad">Could not add it</h1>' + head + '<p>' + _esc(r.message) + '</p><p class="muted">Close this tab and try again, or tell Claude what it says.</p>';
-  else if (r.created) body = '<h1 class="ok">✓ Doc created</h1>' + head + '<p>' + _esc(r.message) + '</p>' + open;
-  else if (r.exists) body = '<h1 class="ok">Already in the Content Index</h1>' + head + '<p>' + _esc(r.message) + '</p>' + open;
-  else if (r.queued) body = '<h1 class="ok">✓ On the Auto Sync list</h1>' + head + '<p>' + _esc(r.message) + '</p><p class="muted">You can close this tab.</p>';
+  else if (r.created) body = '<h1 class="ok">✓ Doc created</h1>' + head + '<p>' + _esc(r.message) + '</p>' + (r.fullSync ? '<p>' + _esc(r.fullSync) + '</p>' : '') + open;
+  else if (r.exists) body = '<h1 class="ok">Already in the Content Index</h1>' + head + '<p>' + _esc(r.message) + '</p>' + (r.fullSync ? '<p>' + _esc(r.fullSync) + '</p>' : '') + open;
+  else if (r.queued) body = '<h1 class="ok">✓ On the Auto Sync list</h1>' + head + '<p>' + _esc(r.message) + '</p>' + (r.fullSync ? '<p>' + _esc(r.fullSync) + '</p>' : '') + '<p class="muted">You can close this tab.</p>';
   else {
     body = '<h1>Add this article to the Content Index?</h1>' + head +
       '<p>' + (r.listed ? 'It is already on the Auto Sync list but has no Doc yet.' : 'This adds its Help Center URL to the HC Auto Sync list.') + ' ' +
-      (r.now ? 'Then Auto Sync creates the Doc right away,' : 'Auto Sync creates the Doc on its next run (weeknights, 2am UTC),') +
+      (r.now ? 'Then Auto Sync creates the Doc right away and starts a full sync of all articles,' : 'Auto Sync creates the Doc on its next run (weeknights, 2am UTC),') +
       ' in the same format as every other Help Center Doc, and keeps it updated after that.</p>' +
       '<p class="muted">Nothing changes in Contentful. Auto Sync never makes a second Doc for the same article.</p>' +
       '<a class="btn" href="' + _esc(ScriptApp.getService().getUrl() + '?create=contentful&id=' + encodeURIComponent(entryId) + '&go=1') + '" target="_top">Add it</a>';
