@@ -426,13 +426,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.8.0');
+  assert.strictEqual(v.server, '2.8.1');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.8.0');
+  assert.strictEqual(bad.server, '2.8.1');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.8.0');
+  assert.strictEqual(get.server, '2.8.1');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -627,6 +627,18 @@ test('re-audit: buildAuditQueue copies the EN/ES Doc text (and the old scores on
   // a second build keeps the first copy of the old scores
   g.buildAuditQueue();
   assert.strictEqual(sheets.translation_scores_before_reaudit.data()[1][11], 87);
+  // paste page: any number of results, notes as an object
+  const page = g.doGet({ parameter: { save: 'audit' } }).html;
+  assert.ok(/Paste here what you copied/.test(page) && /saveAuditPaste/.test(page));
+  const js = page.match(/<script>([\s\S]*)<\/script>/)[1]; new Function(js);   // the page's script compiles
+  const pasted = JSON.stringify([{ k: 'what are preset jobs', s: 55, n: { aiScore: 55, missing: ['A'.repeat(2000)] } }, { k: 'nope', s: 1, n: '' }]);
+  const chk = g.saveAuditPaste(pasted, false);
+  assert.ok(chk.ok && chk.items.length === 2 && chk.unknown === 1 && chk.items[0].old === '61', JSON.stringify(chk));
+  assert.strictEqual(tr.data()[1][11], 61, 'check writes nothing');
+  const sv = g.saveAuditPaste(pasted, true);
+  assert.ok(sv.ok && sv.saved === 1, JSON.stringify(sv));
+  assert.strictEqual(tr.data()[1][11], 55); assert.ok(/AAAA/.test(tr.data()[1][8]));
+  assert.ok(!g.saveAuditPaste('not json', true).ok);
   // bad input
   assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: enc([{ k: 'x', s: 300 }]) } }).html));
   assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: 'garbage' } }).html));

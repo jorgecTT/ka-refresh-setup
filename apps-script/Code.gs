@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.8.0)
+ * KA Sync v2 — Google Apps Script backend (v2.8.1)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.8.1
+ *   - <web app URL>?save=audit (no data): a page to paste all the dashboard's
+ *     results and save them at once (a link with many results was too long).
  *
  * v2.8.0 (translation re-audit, no API key)
  *   - buildAuditQueue(): copies the EN and ES text of every translation into
@@ -144,7 +148,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.8.0';
+var CODE_VERSION = '2.8.1';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1529,21 +1533,39 @@ function setupAuditQueueTrigger() {
   return 'buildAuditQueue daily trigger set (about 5am, script time zone)';
 }
 
-// The dashboard sends [{k: translationKey, s: score, n: notes JSON string}] as base64url JSON.
-function _readAuditResults(d) {
-  var json = Utilities.newBlob(Utilities.base64DecodeWebSafe(String(d || ''))).getDataAsString('UTF-8');
-  var list = JSON.parse(json);
-  if (!Array.isArray(list) || !list.length || list.length > 25) throw new Error('No results to save.');
+// Results are [{k: translationKey, s: score, n: notes (JSON string or object)}]: as base64url JSON in the
+// link (a few), or pasted into the save page (any number).
+function _checkAuditList(list) {
+  if (!Array.isArray(list) || !list.length || list.length > 300) throw new Error('No results to save.');
   return list.map(function (x) {
     var s = Number(x && x.s);
     if (!x || !x.k || isNaN(s) || s < 0 || s > 100) throw new Error('A result is not valid.');
-    return { k: String(x.k), s: Math.round(s), n: String(x.n || '').slice(0, 4000) };
+    var n = x.n && typeof x.n === 'object' ? JSON.stringify(x.n) : String(x.n || '');
+    return { k: String(x.k), s: Math.round(s), n: n.slice(0, 4000) };
   });
+}
+function _readAuditResults(d) {
+  var json = Utilities.newBlob(Utilities.base64DecodeWebSafe(String(d || ''))).getDataAsString('UTF-8');
+  return _checkAuditList(JSON.parse(json));
+}
+
+/** Called from the save page (google.script.run) with the text pasted from the dashboard. */
+function saveAuditPaste(text, go) {
+  var list;
+  try { list = _checkAuditList(JSON.parse(String(text || '').trim())); }
+  catch (e) { return { ok: false, message: 'That is not the text copied from the dashboard (' + (e && e.message || e) + ').' }; }
+  var r = _saveAuditList(list, go);
+  if (r.items) r.items = r.items.map(function (i) { return { title: i.title, old: i.old === '' || i.old == null ? '—' : String(i.old), s: i.x.s, known: !!i.r }; });
+  return r;
 }
 
 function saveAuditResults(d, go) {
+  try { return _saveAuditList(_readAuditResults(d), go); }
+  catch (err) { return { ok: false, message: String(err && err.message || err) }; }
+}
+
+function _saveAuditList(list, go) {
   try {
-    var list = _readAuditResults(d);
     var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID), sh = ss.getSheetByName('localization_tracker');
     var t = _tabObjects(sh), h = t.header;
     var col = function (name) { var i = h.indexOf(name); if (i < 0) throw new Error('localization_tracker has no "' + name + '" column.'); return i + 1; };
@@ -1572,6 +1594,25 @@ function saveAuditResults(d, go) {
   } catch (err) {
     return { ok: false, message: String(err && err.message || err) };
   }
+}
+
+// <web app URL>?save=audit with no data: a page to paste the results copied from the dashboard.
+function _pastePage() {
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;background:#f7f7f8;color:#2f3033;margin:0;padding:24px 16px}' +
+    '.c{background:#fff;border:1px solid #e3e6e8;border-radius:10px;padding:24px 26px;max-width:680px;margin:0 auto}h1{font-size:21px;margin:0 0 8px}p{margin:6px 0;line-height:1.5}' +
+    'textarea{width:100%;height:150px;font:12px monospace;border:1px solid #ccc;border-radius:6px;padding:8px;box-sizing:border-box}button{background:#009fd9;color:#fff;border:0;padding:9px 16px;border-radius:7px;font-weight:600;margin-top:10px;cursor:pointer}' +
+    'button:disabled{opacity:.5}table{border-collapse:collapse;width:100%;font-size:14px;margin-top:8px}td{border-bottom:1px solid #eee;padding:6px 4px}.n{text-align:right;white-space:nowrap}.muted{color:#6b7280;font-size:13px}.ok{color:#1b7a43}.bad{color:#c22d2d}</style></head><body><div class="c">' +
+    '<h1>Save the new translation scores</h1><p>Paste here what you copied in the dashboard (Cmd + V), then click Check.</p>' +
+    '<textarea id="t" placeholder="[{&quot;k&quot;: …"></textarea><div><button id="chk">Check</button> <button id="save" hidden>Save</button></div><div id="out"></div>' +
+    '<p class="muted">Changes aiScore, auditedDate (today) and notes in localization_tracker. Accuracy and status stay as they are. Each change also goes to the translation_audit_log tab.</p></div>' +
+    '<script>var t=document.getElementById("t"),out=document.getElementById("out"),chk=document.getElementById("chk"),sv=document.getElementById("save");' +
+    'function esc(x){return String(x).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c]})}' +
+    'function show(r,done){if(!r.ok){out.innerHTML="<p class=bad>"+esc(r.message)+"</p>";sv.hidden=true;return}' +
+    'out.innerHTML=(done?"<p class=ok><b>✓ Saved "+r.saved+"</b>. You can close this tab and click Refresh data in the dashboard.</p>":"<p><b>"+r.items.filter(function(i){return i.known}).length+" to save</b>"+(r.unknown?" · "+r.unknown+" not in localization_tracker (skipped)":"")+"</p>")+' +
+    '"<table>"+r.items.map(function(i){return "<tr><td>"+esc(i.title)+(i.known?"":" <span class=bad>(skipped)</span>")+"</td><td class=n>"+esc(i.old)+" → <b>"+i.s+"</b></td></tr>"}).join("")+"</table>";sv.hidden=done}' +
+    'chk.onclick=function(){chk.disabled=true;google.script.run.withSuccessHandler(function(r){chk.disabled=false;show(r,false)}).withFailureHandler(function(e){chk.disabled=false;out.innerHTML="<p class=bad>"+esc(e.message||e)+"</p>"}).saveAuditPaste(t.value,false)};' +
+    'sv.onclick=function(){sv.disabled=true;sv.textContent="Saving…";google.script.run.withSuccessHandler(function(r){show(r,true)}).withFailureHandler(function(e){sv.disabled=false;sv.textContent="Save";out.innerHTML="<p class=bad>"+esc(e.message||e)+"</p>"}).saveAuditPaste(t.value,true)};' +
+    '<\/script></body></html>';
 }
 
 function _savePage(r, d) {
@@ -2090,6 +2131,7 @@ function doGet(e) {
   }
   // <web app URL>?save=audit&d=<results>[&go=1] -> save the dashboard's new translation scores to localization_tracker
   if (e && e.parameter && e.parameter.save === 'audit') {
+    if (!e.parameter.d) return HtmlService.createHtmlOutput(_pastePage()).setTitle('Save translation scores').addMetaTag('viewport', 'width=device-width, initial-scale=1');
     return HtmlService.createHtmlOutput(_savePage(saveAuditResults(String(e.parameter.d || ''), e.parameter.go === '1'), String(e.parameter.d || '')))
       .setTitle('Save translation scores').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   }
