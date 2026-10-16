@@ -1612,7 +1612,7 @@ function _pastePage() {
     '"<table>"+r.items.map(function(i){return "<tr><td>"+esc(i.title)+(i.known?"":" <span class=bad>(skipped)</span>")+"</td><td class=n>"+esc(i.old)+" → <b>"+i.s+"</b></td></tr>"}).join("")+"</table>";sv.hidden=done}' +
     'chk.onclick=function(){chk.disabled=true;google.script.run.withSuccessHandler(function(r){chk.disabled=false;show(r,false)}).withFailureHandler(function(e){chk.disabled=false;out.innerHTML="<p class=bad>"+esc(e.message||e)+"</p>"}).saveAuditPaste(t.value,false)};' +
     'sv.onclick=function(){sv.disabled=true;sv.textContent="Saving…";google.script.run.withSuccessHandler(function(r){show(r,true)}).withFailureHandler(function(e){sv.disabled=false;sv.textContent="Save";out.innerHTML="<p class=bad>"+esc(e.message||e)+"</p>"}).saveAuditPaste(t.value,true)};' +
-    '<\/script></body></html>';
+    '<' + '/script></body></html>';
 }
 
 function _savePage(r, d) {
