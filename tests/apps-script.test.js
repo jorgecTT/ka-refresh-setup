@@ -24,6 +24,7 @@ function loadBackend(opts) {
       getRange(r, c, nr, nc) {
         return {
           setValues(v) { for (let i = 0; i < v.length; i++) data[r - 1 + i] = v[i].slice(); },
+          setValue(v) { (data[r - 1] = data[r - 1] || [])[c - 1] = v; },
           setFontWeight() {}, setBackgrounds(b) { backgrounds = b; },
           getValue() { return (data[r - 1] || [])[c - 1]; },
           getValues() { const out = []; for (let i = 0; i < nr; i++) out.push((data[r - 1 + i] || []).slice(c - 1, c - 1 + nc)); return out; },
@@ -51,7 +52,8 @@ function loadBackend(opts) {
       createTextOutput: (t) => ({ text: t, setMimeType() { return this; } }),
     },
     Utilities: {
-      newBlob: (html) => ({ html }),
+      newBlob: (x) => ({ html: x, getDataAsString: () => (typeof x === 'string' ? x : Buffer.from(x).toString('utf8')) }),
+      base64DecodeWebSafe: (t) => Buffer.from(String(t).replace(/-/g, '+').replace(/_/g, '/'), 'base64'),
       formatDate(d, tz, fmt) {
         if (!fmt) return '';
         if (fmt === 'MMM d') return d.toLocaleDateString('en-US', { timeZone: tz, month: 'short', day: 'numeric' });
@@ -88,7 +90,7 @@ function loadBackend(opts) {
       openById(id) {
         const f = files[id];
         if (!f) throw new Error('no doc ' + id);
-        return { getHeader: () => (f.headerVersion ? { getText: () => 'Published link: x\nVersion: ' + f.headerVersion + '\n' } : null) };
+        return { getBody: () => ({ getText: () => f.text || '' }), getHeader: () => (f.headerVersion ? { getText: () => 'Published link: x\nVersion: ' + f.headerVersion + '\n' } : null) };
       },
     },
     MailApp: { sendEmail: (m) => mails.push(m) },
@@ -424,13 +426,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.7.5');
+  assert.strictEqual(v.server, '2.8.0');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.7.5');
+  assert.strictEqual(bad.server, '2.8.0');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.7.5');
+  assert.strictEqual(get.server, '2.8.0');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -594,6 +596,40 @@ test('setupSearchNames creates the search_names tab once', () => {
   sheets.search_names.appendRow(['x, y', '']);
   assert.ok(/already exists/.test(g.setupSearchNames()));
   assert.strictEqual(sheets.search_names.data().length, 4, 'never touched again');
+});
+
+test('re-audit: buildAuditQueue copies the EN/ES Doc text (and the old scores once); ?save=audit writes the new scores after a confirm', () => {
+  const files = { en1: { text: 'Preset jobs. Cancel a job. Tip: fees.' }, es1: { text: 'Trabajos preestablecidos.' }, en2: { text: 'x' } };
+  const { g, sheets } = loadBackend({ files });
+  const ss = g.SpreadsheetApp.openById('x'), tr = ss.insertSheet('localization_tracker');
+  tr.appendRow(['translationKey', 'titleEN', 'docIdEN', 'docIdES', 'audience', 'status', 'auditedDate', 'accuracy', 'notes', 'startedDate', 'esLastUpdated', 'aiScore']);
+  tr.appendRow(['what are preset jobs', 'What are preset jobs', 'en1', 'es1', 'pro', 'translated', '', 0.9, 'old note', '', '', 87]);
+  tr.appendRow(['no spanish', 'No Spanish', 'en2', '', 'pro', 'not_translated', '', '', '', '', '', '']);
+  tr.appendRow(['broken', 'Broken', 'en1', 'missing', 'pro', 'translated', '', '', '', '', '', 50]);
+  const msg = g.buildAuditQueue();
+  assert.ok(/^1 translations ready/.test(msg) && /could not read 1: broken/.test(msg), msg);
+  const q = sheets.translation_audit_queue.data();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(q[0])), ['translationKey', 'titleEN', 'docIdEN', 'docIdES', 'enText', 'esText', 'enWords', 'esWords', 'preparedAt']);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(q[1].slice(0, 8))), ['what are preset jobs', 'What are preset jobs', 'en1', 'es1', 'Preset jobs. Cancel a job. Tip: fees.', 'Trabajos preestablecidos.', 7, 2]);
+  assert.strictEqual(sheets.translation_scores_before_reaudit.data()[1][11], 87, 'the old scores are kept');
+  // save: preview first, nothing written
+  const enc = o => Buffer.from(JSON.stringify(o), 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const d = enc([{ k: 'what are preset jobs', s: 61, n: '{"aiScore":61,"notes":"Cancelación falta"}' }, { k: 'nope', s: 80, n: '' }]);
+  const prev = g.doGet({ parameter: { save: 'audit', d } }).html;
+  assert.ok(/Save 1 new scores/.test(prev) && /87 → <b>61<\/b>/.test(prev) && /not in localization_tracker: skipped/.test(prev), prev);
+  assert.strictEqual(tr.data()[1][11], 87, 'preview writes nothing');
+  const done = g.doGet({ parameter: { save: 'audit', d, go: '1' } }).html;
+  assert.ok(/Saved 1/.test(done), done);
+  const row = tr.data()[1];
+  assert.strictEqual(row[11], 61); assert.ok(/^\d{4}-\d\d-\d\d$/.test(row[6])); assert.ok(/Cancelación falta/.test(row[8]));
+  assert.strictEqual(row[7], 0.9, 'accuracy untouched'); assert.strictEqual(row[5], 'translated', 'status untouched');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(sheets.translation_audit_log.data()[1].slice(0, 4))), ['what are preset jobs', 'What are preset jobs', 87, 61]);
+  // a second build keeps the first copy of the old scores
+  g.buildAuditQueue();
+  assert.strictEqual(sheets.translation_scores_before_reaudit.data()[1][11], 87);
+  // bad input
+  assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: enc([{ k: 'x', s: 300 }]) } }).html));
+  assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: 'garbage' } }).html));
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');

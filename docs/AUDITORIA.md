@@ -116,3 +116,9 @@ una vez y luego `setupContentfulTrigger` para que corra todos los días.
 - **Slack:** una búsqueda por el título y hasta 2 otros nombres, juntas.
 - **Find gaps:** temas, sentimiento y los 50 comentarios más recientes, más el texto del artículo (`fullText`), los lee Claude (capability `sample`) y lista gaps, contradicciones y lo que ya está cubierto.
 - **Customer feedback → Topics without an article:** los 40 temas de Enterpret con más comentarios (sin MISC). Claude los compara con los títulos y concepts del corpus (inglés) y marca Covered, Partly o No article.
+
+## Reauditoría de traducciones sin API key (Code.gs 2.8.0)
+
+1. `buildAuditQueue()` copia el texto EN y ES de cada traducción (de los Docs) a `translation_audit_queue`. La primera vez guarda los scores de antes en `translation_scores_before_reaudit`. `setupAuditQueueTrigger()` la corre cada noche.
+2. El dashboard (Scores → Re-audit from scratch) le da a Claude 5 traducciones por click, con los términos del glosario (`glossary_auto`) que aparecen en el artículo. Escala: completeness 40, accuracy 30, glossary 20, tone 10. Los resultados se guardan en la base de datos del artifact (`reaudit/<key>`, ronda en `meta/reaudit`).
+3. **Save to tracker** abre `<web app>?save=audit&d=…` (base64url JSON, hasta 10): muestra viejo → nuevo y, con Save, escribe aiScore, auditedDate y notes (JSON con las 4 partes, missing, issues, notes) en `localization_tracker`, y una línea en `translation_audit_log`.

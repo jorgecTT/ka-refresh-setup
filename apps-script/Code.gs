@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.7.5)
+ * KA Sync v2 — Google Apps Script backend (v2.8.0)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,12 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.8.0 (translation re-audit, no API key)
+ *   - buildAuditQueue(): copies the EN and ES text of every translation into
+ *     translation_audit_queue for the dashboard (keeps a copy of the old scores first).
+ *   - <web app URL>?save=audit&d=...: saves the dashboard's new scores to
+ *     localization_tracker (aiScore, auditedDate, notes) after a confirm page.
  *
  * v2.7.5
  *   - setupSearchNames(): creates the search_names tab (other names for the same
@@ -138,7 +144,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.7.5';
+var CODE_VERSION = '2.8.0';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1459,6 +1465,135 @@ function setupSearchNames() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Translation re-audit, without an API key (2.8.0)
+//
+// 1. buildAuditQueue() (run it, or setupAuditQueueTrigger() for every night)
+//    copies the current English and Spanish text of every translated Help
+//    Center article from its Doc into the translation_audit_queue tab. The
+//    first time, it also keeps a copy of localization_tracker as it was
+//    (translation_scores_before_reaudit), so nothing is lost.
+// 2. The Content Index Dashboard (Scores tab) gives Claude 5 articles per
+//    click from that tab, and keeps the new scores and notes.
+// 3. Its "Save to tracker" link opens <web app URL>?save=audit&d=<results>:
+//    it shows old → new and writes them to localization_tracker on "Save".
+//    It only changes aiScore, auditedDate and notes (never accuracy or status).
+// ═══════════════════════════════════════════════════════════════════════════
+
+var TR_AUDIT_QUEUE_TAB = 'translation_audit_queue';
+var TR_AUDIT_BEFORE_TAB = 'translation_scores_before_reaudit';
+var TR_AUDIT_LOG_TAB = 'translation_audit_log';
+var TR_AUDIT_TEXT_MAX = 45000;   // a sheet cell holds 50,000 characters
+
+function _tabObjects(sh) {
+  var v = sh ? sh.getDataRange().getValues() : [];
+  if (v.length < 2) return { header: v[0] || [], rows: [] };
+  var h = v[0];
+  return { header: h, rows: v.slice(1).map(function (r, i) { var o = { _row: i + 2 }; h.forEach(function (k, j) { o[k] = r[j]; }); return o; }) };
+}
+
+function _docText(id) {
+  var t = DocumentApp.openById(id).getBody().getText();
+  return t.length > TR_AUDIT_TEXT_MAX ? t.slice(0, TR_AUDIT_TEXT_MAX) + '\n[text cut]' : t;
+}
+
+function buildAuditQueue() {
+  var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID);
+  var trackerSh = ss.getSheetByName('localization_tracker');
+  if (!trackerSh) throw new Error('No localization_tracker tab in the corpus sheet.');
+  if (!ss.getSheetByName(TR_AUDIT_BEFORE_TAB)) {
+    var all = trackerSh.getDataRange().getValues();
+    _writeTab(ss, TR_AUDIT_BEFORE_TAB, all[0], all.slice(1));
+  }
+  var tr = _tabObjects(trackerSh).rows.filter(function (r) { return r.translationKey && r.docIdEN && r.docIdES; });
+  var now = Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm');
+  var rows = [], failed = [];
+  tr.forEach(function (r) {
+    try {
+      var en = _docText(String(r.docIdEN)), es = _docText(String(r.docIdES));
+      var we = en.split(/\s+/).filter(String).length, ws = es.split(/\s+/).filter(String).length;
+      rows.push([r.translationKey, r.titleEN || '', String(r.docIdEN), String(r.docIdES), en, es, we, ws, now]);
+    } catch (e) { failed.push(r.translationKey + ': ' + (e && e.message || e)); }
+  });
+  _writeTab(ss, TR_AUDIT_QUEUE_TAB, ['translationKey', 'titleEN', 'docIdEN', 'docIdES', 'enText', 'esText', 'enWords', 'esWords', 'preparedAt'], rows);
+  var msg = rows.length + ' translations ready for the re-audit' + (failed.length ? '; could not read ' + failed.length + ': ' + failed.slice(0, 5).join(' | ') : '');
+  Logger.log(msg);
+  return msg;
+}
+
+/** Run once: buildAuditQueue every night around 5am (before the dashboard is used). */
+function setupAuditQueueTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'buildAuditQueue') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('buildAuditQueue').timeBased().everyDays(1).atHour(5).create();
+  return 'buildAuditQueue daily trigger set (about 5am, script time zone)';
+}
+
+// The dashboard sends [{k: translationKey, s: score, n: notes JSON string}] as base64url JSON.
+function _readAuditResults(d) {
+  var json = Utilities.newBlob(Utilities.base64DecodeWebSafe(String(d || ''))).getDataAsString('UTF-8');
+  var list = JSON.parse(json);
+  if (!Array.isArray(list) || !list.length || list.length > 25) throw new Error('No results to save.');
+  return list.map(function (x) {
+    var s = Number(x && x.s);
+    if (!x || !x.k || isNaN(s) || s < 0 || s > 100) throw new Error('A result is not valid.');
+    return { k: String(x.k), s: Math.round(s), n: String(x.n || '').slice(0, 4000) };
+  });
+}
+
+function saveAuditResults(d, go) {
+  try {
+    var list = _readAuditResults(d);
+    var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID), sh = ss.getSheetByName('localization_tracker');
+    var t = _tabObjects(sh), h = t.header;
+    var col = function (name) { var i = h.indexOf(name); if (i < 0) throw new Error('localization_tracker has no "' + name + '" column.'); return i + 1; };
+    var cScore = col('aiScore'), cDate = col('auditedDate'), cNotes = col('notes');
+    var byKey = {}; t.rows.forEach(function (r) { byKey[String(r.translationKey)] = r; });
+    var items = list.map(function (x) { var r = byKey[x.k]; return { x: x, r: r, title: r ? (r.titleEN || x.k) : x.k, old: r ? r.aiScore : '' }; });
+    var unknown = items.filter(function (i) { return !i.r; });
+    if (!go) return { ok: true, preview: true, items: items, unknown: unknown.length };
+    var lock = LockService.getScriptLock();
+    if (!lock.tryLock(20000)) return { ok: false, message: 'Busy right now. Try again in a moment.' };
+    try {
+      var today = Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd'), by = _viewer();
+      var log = ss.getSheetByName(TR_AUDIT_LOG_TAB);
+      if (!log) { log = ss.insertSheet(TR_AUDIT_LOG_TAB); log.appendRow(['translationKey', 'title', 'oldScore', 'newScore', 'notes', 'savedAt', 'by']); }
+      var saved = 0;
+      items.forEach(function (i) {
+        if (!i.r) return;
+        sh.getRange(i.r._row, cScore).setValue(i.x.s);
+        sh.getRange(i.r._row, cDate).setValue(today);
+        sh.getRange(i.r._row, cNotes).setValue(i.x.n);
+        log.appendRow([i.x.k, i.title, i.old, i.x.s, i.x.n, Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm'), by]);
+        saved++;
+      });
+      return { ok: true, saved: saved, items: items, unknown: unknown.length };
+    } finally { lock.releaseLock(); }
+  } catch (err) {
+    return { ok: false, message: String(err && err.message || err) };
+  }
+}
+
+function _savePage(r, d) {
+  var css = '<style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;background:#f7f7f8;color:#2f3033;margin:0;padding:24px 16px}' +
+    '.c{background:#fff;border:1px solid #e3e6e8;border-radius:10px;padding:24px 26px;max-width:640px;margin:0 auto}h1{font-size:21px;margin:0 0 10px}' +
+    'p{margin:6px 0;line-height:1.5}.ok{color:#1b7a43}.bad{color:#c22d2d}.btn{display:inline-block;background:#009fd9;color:#fff;text-decoration:none;padding:9px 16px;border-radius:7px;font-weight:600;margin-top:12px}' +
+    'table{border-collapse:collapse;width:100%;font-size:14px;margin-top:8px}td{border-bottom:1px solid #eee;padding:6px 4px}.n{text-align:right;white-space:nowrap}.muted{color:#6b7280;font-size:13px}</style>';
+  var rows = function () {
+    return '<table>' + r.items.map(function (i) {
+      return '<tr><td>' + _esc(i.title) + (i.r ? '' : ' <span class="bad">(not in localization_tracker: skipped)</span>') + '</td><td class="n">' + _esc(i.old === '' || i.old == null ? '—' : i.old) + ' → <b>' + i.x.s + '</b></td></tr>';
+    }).join('') + '</table>';
+  };
+  var body;
+  if (!r.ok) body = '<h1 class="bad">Could not save</h1><p>' + _esc(r.message) + '</p>';
+  else if (r.preview) body = '<h1>Save ' + (r.items.length - r.unknown) + ' new scores to localization_tracker?</h1>' + rows() +
+    '<p class="muted">Changes aiScore, auditedDate (today) and notes. Accuracy and status stay as they are. A copy of each change goes to the translation_audit_log tab.</p>' +
+    '<a class="btn" href="' + _esc(ScriptApp.getService().getUrl() + '?save=audit&go=1&d=' + encodeURIComponent(d)) + '" target="_top" onclick="this.textContent=\'Saving…\';this.style.opacity=.6;this.style.pointerEvents=\'none\'">Save</a>';
+  else body = '<h1 class="ok">✓ Saved ' + r.saved + '</h1>' + rows() + '<p class="muted">You can close this tab. In the dashboard, click Refresh data to see them.</p>';
+  return '<!DOCTYPE html><html><head><meta charset="utf-8">' + css + '</head><body><div class="c">' + body + '</div></body></html>';
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Put a Contentful article in the Content Index (2.7.1)
 //
 // The Help Center Docs are made and kept up to date by HC Auto Sync, from the
@@ -1952,6 +2087,11 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.refresh === 'contentful') {
     return HtmlService.createHtmlOutput(_refreshPage(refreshContentfulNow()))
       .setTitle('Update from Contentful').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  }
+  // <web app URL>?save=audit&d=<results>[&go=1] -> save the dashboard's new translation scores to localization_tracker
+  if (e && e.parameter && e.parameter.save === 'audit') {
+    return HtmlService.createHtmlOutput(_savePage(saveAuditResults(String(e.parameter.d || ''), e.parameter.go === '1'), String(e.parameter.d || '')))
+      .setTitle('Save translation scores').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   }
   // <web app URL>?create=contentful&id=<entryId>[&go=1] -> copy a Contentful article into the Content Index
   if (e && e.parameter && e.parameter.create === 'contentful') {
