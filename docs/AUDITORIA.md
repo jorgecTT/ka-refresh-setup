@@ -134,3 +134,7 @@ Arreglo:
 - Code.gs 2.9.1: rechaza un sync sin título real o casi sin texto (EMPTY_KA) y no toca el Doc. Si el texto nuevo es menos del 30% del Doc, pregunta antes (WOULD_SHRINK); el script muestra un aviso y, si confirmas, lo manda de nuevo.
 
 Para arreglar los cuatro Docs: abre cada KA en Salesforce, espera que cargue completo y dale Update. El historial de versiones de cada Doc también guarda la versión anterior ("Sync 2026-10-06", etc.).
+
+## Guardar el score de un artículo que no está en localization_tracker (Code.gs 2.9.2)
+
+La página de guardar saltaba los artículos sin fila en `localization_tracker` ("1 not in localization_tracker (skipped)"). Ahora el dashboard manda también el título, los Doc ids y la audiencia, y la página agrega la fila nueva con aiScore, auditedDate y notes (status queda vacío). En el dashboard, arriba del botón Copy, sale la lista de lo que se va a guardar.

@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.9.1)
+ * KA Sync v2 — Google Apps Script backend (v2.9.2)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.2
+ *   - save page: an article that has no row in localization_tracker yet gets one
+ *     (title, Doc ids and audience come from the dashboard) instead of being skipped.
  *
  * v2.9.1
  *   - sync refuses a KA that hadn't finished loading (title "Untitled" or almost no text):
@@ -159,7 +163,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.9.1';
+var CODE_VERSION = '2.9.2';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1578,7 +1582,9 @@ function _checkAuditList(list) {
     var s = Number(x && x.s);
     if (!x || !x.k || isNaN(s) || s < 0 || s > 100) throw new Error('A result is not valid.');
     var n = x.n && typeof x.n === 'object' ? JSON.stringify(x.n) : String(x.n || '');
-    return { k: String(x.k), s: Math.round(s), n: n.slice(0, 4000) };
+    var str = function (v, max) { return String(v == null ? '' : v).slice(0, max || 300); };
+    return { k: String(x.k), s: Math.round(s), n: n.slice(0, 4000),
+      t: str(x.t), en: str(x.en, 80), es: str(x.es, 80), a: str(x.a, 40) };
   });
 }
 function _readAuditResults(d) {
@@ -1592,7 +1598,7 @@ function saveAuditPaste(text, go) {
   try { list = _checkAuditList(JSON.parse(String(text || '').trim())); }
   catch (e) { return { ok: false, message: 'That is not the text copied from the dashboard (' + (e && e.message || e) + ').' }; }
   var r = _saveAuditList(list, go);
-  if (r.items) r.items = r.items.map(function (i) { return { title: i.title, old: i.old === '' || i.old == null ? '—' : String(i.old), s: i.x.s, known: !!i.r }; });
+  if (r.items) r.items = r.items.map(function (i) { return { title: i.title, old: i.old === '' || i.old == null ? (i.add ? 'new row' : '—') : String(i.old), s: i.x.s, known: !!i.r || i.add }; });
   return r;
 }
 
@@ -1608,8 +1614,9 @@ function _saveAuditList(list, go) {
     var col = function (name) { var i = h.indexOf(name); if (i < 0) throw new Error('localization_tracker has no "' + name + '" column.'); return i + 1; };
     var cScore = col('aiScore'), cDate = col('auditedDate'), cNotes = col('notes');
     var byKey = {}; t.rows.forEach(function (r) { byKey[String(r.translationKey)] = r; });
-    var items = list.map(function (x) { var r = byKey[x.k]; return { x: x, r: r, title: r ? (r.titleEN || x.k) : x.k, old: r ? r.aiScore : '' }; });
-    var unknown = items.filter(function (i) { return !i.r; });
+    var items = list.map(function (x) { var r = byKey[x.k]; return { x: x, r: r, title: r ? (r.titleEN || x.k) : (x.t || x.k), old: r ? r.aiScore : '', add: !r && !!(x.en && x.es) }; });
+    // not in the tracker yet: added as a new row when the dashboard sent its Doc ids, otherwise skipped
+    var unknown = items.filter(function (i) { return !i.r && !i.add; });
     if (!go) return { ok: true, preview: true, items: items, unknown: unknown.length };
     var lock = LockService.getScriptLock();
     if (!lock.tryLock(20000)) return { ok: false, message: 'Busy right now. Try again in a moment.' };
@@ -1619,6 +1626,16 @@ function _saveAuditList(list, go) {
       if (!log) { log = ss.insertSheet(TR_AUDIT_LOG_TAB); log.appendRow(['translationKey', 'title', 'oldScore', 'newScore', 'notes', 'savedAt', 'by']); }
       var saved = 0;
       items.forEach(function (i) {
+        if (!i.r && i.add) {
+          var row = h.map(function (name) {
+            return ({ translationKey: i.x.k, titleEN: i.x.t || i.x.k, docIdEN: i.x.en, docIdES: i.x.es, audience: i.x.a,
+              aiScore: i.x.s, auditedDate: today, notes: i.x.n })[name] || '';
+          });
+          sh.appendRow(row);
+          log.appendRow([i.x.k, i.title, '', i.x.s, i.x.n, Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm'), by]);
+          saved++;
+          return;
+        }
         if (!i.r) return;
         sh.getRange(i.r._row, cScore).setValue(i.x.s);
         sh.getRange(i.r._row, cDate).setValue(today);

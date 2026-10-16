@@ -427,13 +427,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.9.1');
+  assert.strictEqual(v.server, '2.9.2');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.9.1');
+  assert.strictEqual(bad.server, '2.9.2');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.9.1');
+  assert.strictEqual(get.server, '2.9.2');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -640,6 +640,15 @@ test('re-audit: buildAuditQueue copies the EN/ES Doc text (and the old scores on
   assert.ok(sv.ok && sv.saved === 1, JSON.stringify(sv));
   assert.strictEqual(tr.data()[1][11], 55); assert.ok(/AAAA/.test(tr.data()[1][8]));
   assert.ok(!g.saveAuditPaste('not json', true).ok);
+  // an article that has no tracker row yet: a new row is added (status left empty)
+  const fresh = JSON.stringify([{ k: 'what is google ai search?', s: 85, n: { notes: 'California exclusion missing' }, t: 'What is Google AI search?', en: 'enG', es: 'esG', a: 'pro' }]);
+  const c2 = g.saveAuditPaste(fresh, false);
+  assert.ok(c2.ok && c2.unknown === 0 && c2.items[0].known && c2.items[0].old === 'new row', JSON.stringify(c2));
+  const n0 = tr.data().length;
+  assert.ok(g.saveAuditPaste(fresh, true).saved === 1);
+  const added = tr.data()[n0];
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(added.slice(0, 7))), ['what is google ai search?', 'What is Google AI search?', 'enG', 'esG', 'pro', '', added[6]]);
+  assert.strictEqual(added[11], 85); assert.ok(/^\d{4}-\d\d-\d\d$/.test(added[6])); assert.ok(/California/.test(added[8]));
   // bad input
   assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: enc([{ k: 'x', s: 300 }]) } }).html));
   assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: 'garbage' } }).html));
