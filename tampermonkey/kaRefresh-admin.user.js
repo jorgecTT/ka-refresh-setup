@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.7.2
+// @version      2.7.3
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -104,7 +104,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.7.2';
+  const SCRIPT_VERSION = '2.7.3';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -699,7 +699,7 @@
     if (!simpleFields['Title'] && !simpleFields['Article Number']) return null;
     return {
       simpleFields, richFields,
-      title: simpleFields['Title'] || 'Untitled',
+      title: simpleFields['Title'] || '',
       kaId: simpleFields['Article Number'] || simpleFields['URL Name'] || '',
       version: simpleFields['Version Number'] || '',
       lastModified: formatLastModified(simpleFields),
@@ -707,7 +707,24 @@
     };
   }
 
-  async function _performSync(ka, mode, reviewer, audience) {
+  // Lightning fills the page in pieces: wait until the title AND the article text are there.
+  const _kaTextLen = ka => Object.values(ka.richFields || {}).reduce((n, f) => n + ((f && f.text) || '').length, 0);
+  const _kaReady = ka => !!(ka && ka.title && _kaTextLen(ka) >= 40);
+  async function _readKaReady(tries) {
+    let ka = null;
+    for (let i = 0; i < (tries || 20); i++) {
+      ka = _readKa();
+      if (_kaReady(ka)) return ka;
+      await sleep(500);
+    }
+    return null;
+  }
+
+  async function _performSync(ka, mode, reviewer, audience, allowShrink) {
+    if (!_kaReady(ka)) {
+      setStatus('error', 'The KA hasn\u2019t finished loading (no title or no article text yet). Nothing was synced. Wait a few seconds and click again.');
+      return;
+    }
     setStatus('loading', 'Normalizing HTML\u2026');
     const html = normalizeKaHtml(ka.richFields, ka.title);
     setStatus('loading', (mode === 'create' ? 'Creating' : 'Updating') + ' Doc\u2026');
@@ -717,9 +734,13 @@
         action: 'sync', mode,
         title: ka.title, kaId: ka.kaId, version: ka.version,
         lastModified: ka.lastModified, url: ka.url,
-        html, reviewer, audience: audience || '',
+        html, reviewer, audience: audience || '', allowShrink: !!allowShrink,
       });
     } catch (e) { setStatus('error', e.message); return; }
+    if (!result.ok && result.code === 'WOULD_SHRINK' && !allowShrink &&
+        window.confirm('This KA is much shorter than its Doc (' + result.newChars + ' vs ' + result.oldChars + ' characters).\n\nOK = the KA really got shorter, update the Doc.\nCancel = keep the Doc as it is.')) {
+      return _performSync(ka, mode, reviewer, audience, true);
+    }
     if (result.ok) {
       setDoneStatus(
         (result.mode === 'create' ? 'Created: ' : 'Updated: ') + (result.filename || ka.title),
@@ -740,9 +761,9 @@
       if (!reviewer) return;
 
       setStatus('loading', 'Reading KA fields\u2026');
-      const ka = _readKa();
+      const ka = await _readKaReady(20);
       if (!ka) {
-        setStatus('error', 'Could not read the KA. Wait for the page to finish loading and try again.');
+        setStatus('error', 'The KA hasn\u2019t finished loading (no title or no article text yet). Nothing was synced. Wait a few seconds and try again.');
         return;
       }
 
@@ -1871,7 +1892,7 @@
       const isTarget = target.recordId
         ? location.href.indexOf(target.recordId) !== -1      // record link (outdated / fix list)
         : slugOf(cur && cur.url) === slugOf(target.url);     // article link (ka_published)
-      if (cur && cur.title && isTarget) { ka = cur; break; }
+      if (_kaReady(cur) && isTarget) { ka = cur; break; }
       await sleep(500);
     }
 

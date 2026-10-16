@@ -124,3 +124,13 @@ una vez y luego `setupContentfulTrigger` para que corra todos los días.
 3. **Save to tracker** abre `<web app>?save=audit&d=…` (base64url JSON, hasta 10): muestra viejo → nuevo y, con Save, escribe aiScore, auditedDate y notes (JSON con las 4 partes, missing, issues, notes) en `localization_tracker`, y una línea en `translation_audit_log`.
 - 2.8.1: con muchos resultados el link era demasiado largo (Google responde 400). Ahora el dashboard copia los resultados y `<web app>?save=audit` (sin datos) abre una página para pegarlos: Check y Save (via `saveAuditPaste`), todos de una vez.
 - 2.9.0: `<web app>?sync=translation&k=<key>` (botón ⟳ Sync) pide a Auto Sync `sync_single` para el Doc EN y ES (el URL sale del "Published link" del header del Doc) y copia su texto nuevo a `translation_audit_queue`. `?sync=all` (⟳ Sync everything): `run_manual` de Auto Sync y `buildAuditQueue` 30 minutos después. En Scores: ✦ (chat con el skill), ⟳ Sync y click en el score para recalificar.
+
+## Docs vacíos por un sync a medio cargar (Code.gs 2.9.1, admin 2.7.3)
+
+Qué pasó: el 7 y el 13 de octubre de 2026 cuatro Docs de KA quedaron con el título "Untitled" y sin texto (KA 14779 Smarter lead matching, 9193 T&S Payments, 9473 Profile Review, 14456 Pro abuse investigation). El botón de sync leyó la página de Salesforce antes de que Lightning terminara de cargar: ya tenía el número de KA y la versión, pero no el título ni el contenido. El script mandaba "Untitled" y el servidor lo aceptaba, así que reescribió el Doc.
+
+Arreglo:
+- Script de admin 2.7.3: espera hasta 10 segundos a que estén el título y el texto del artículo. Si no llegan, no sincroniza y lo dice. El sync en lote también espera eso.
+- Code.gs 2.9.1: rechaza un sync sin título real o casi sin texto (EMPTY_KA) y no toca el Doc. Si el texto nuevo es menos del 30% del Doc, pregunta antes (WOULD_SHRINK); el script muestra un aviso y, si confirmas, lo manda de nuevo.
+
+Para arreglar los cuatro Docs: abre cada KA en Salesforce, espera que cargue completo y dale Update. El historial de versiones de cada Doc también guarda la versión anterior ("Sync 2026-10-06", etc.).

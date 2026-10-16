@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.9.0)
+ * KA Sync v2 — Google Apps Script backend (v2.9.1)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,12 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.1
+ *   - sync refuses a KA that hadn't finished loading (title "Untitled" or almost no text):
+ *     code EMPTY_KA, the Doc is not touched. In Oct 2026 four Docs were overwritten that way.
+ *   - sync asks first (code WOULD_SHRINK) when the new text is under 30% of the Doc's;
+ *     the admin script confirms and resends with allowShrink.
  *
  * v2.9.0
  *   - <web app URL>?sync=translation&k=<key>: Auto Sync rewrites the EN and ES Docs
@@ -153,7 +159,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.9.0';
+var CODE_VERSION = '2.9.1';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -302,6 +308,16 @@ function handleSync(req, t0) {
     }
   }
 
+  // Never write a KA that didn't finish loading: no real title, or (almost) no text.
+  // That is how 4 Docs became "Untitled" with 1 word in Oct 2026.
+  var plain = _htmlText(req.html);
+  var bodyLen = Math.max(0, plain.length - String(req.title).length);
+  if (/^\s*untitled\s*$/i.test(req.title) || bodyLen < SYNC_MIN_CHARS) {
+    return { ok: false, code: 'EMPTY_KA',
+      error: 'The KA came in ' + (/^\s*untitled\s*$/i.test(req.title) ? 'without its title' : 'almost empty (' + bodyLen + ' characters)') +
+        ', so the page probably had not finished loading. Nothing was changed. Reload the KA and sync again.' };
+  }
+
   var mode = req.mode || 'update';
   var canonicalUrl = normalizeToSlugUrl(req.url);
   var match = findDocByKaIdOrUrl(req.kaId, canonicalUrl);
@@ -324,6 +340,15 @@ function handleSync(req, t0) {
 
   if (mode === 'update') {
     fileId = match.doc.getId();
+    // A Doc with real content should not shrink to a sliver in one sync: ask first.
+    if (!req.allowShrink) {
+      var oldLen = 0;
+      try { oldLen = DocumentApp.openById(fileId).getBody().getText().replace(/\s+/g, ' ').trim().length; } catch (eLen) {}
+      if (oldLen > 1500 && plain.length < oldLen * SYNC_SHRINK_RATIO) {
+        return { ok: false, code: 'WOULD_SHRINK', oldChars: oldLen, newChars: plain.length,
+          error: 'The KA is much shorter than its Doc (' + plain.length + ' vs ' + oldLen + ' characters). Nothing was changed. If the KA really got shorter, sync again and confirm.' };
+      }
+    }
     var file = DriveApp.getFileById(fileId);
     var oldFilename = file.getName();
     var audience = inferAudience(oldFilename) || req.audience || 'general';
@@ -508,6 +533,13 @@ function inferAudience(filename) {
     if (name.indexOf(KNOWN_AUDIENCES[j]) !== -1) return KNOWN_AUDIENCES[j];
   }
   return null;
+}
+
+var SYNC_MIN_CHARS = 40;       // the broken syncs had 0: anything real is more
+var SYNC_SHRINK_RATIO = 0.3;   // new text under 30% of the Doc's = ask first
+function _htmlText(html) {
+  return String(html || '').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
 }
 
 function buildFilename(title, audience) {

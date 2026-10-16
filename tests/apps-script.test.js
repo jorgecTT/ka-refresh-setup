@@ -67,6 +67,7 @@ function loadBackend(opts) {
     },
     Drive: {
       Files: {
+        update(meta, id, blob) { files[id].title = meta.title; files[id].html = blob.html; files[id].updated = (files[id].updated || 0) + 1; return { id }; },
         insert(meta, blob, o) { const id = 'new' + (Object.keys(files).length + 1); files[id] = { title: meta.title, folder: meta.parents[0].id, html: blob.html, mimeType: meta.mimeType }; return { id }; },
         list(q) {
           const folder = (q.q.match(/'([^']+)' in parents/) || [])[1];
@@ -426,13 +427,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.9.0');
+  assert.strictEqual(v.server, '2.9.1');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.9.0');
+  assert.strictEqual(bad.server, '2.9.1');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.9.0');
+  assert.strictEqual(get.server, '2.9.1');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -676,6 +677,29 @@ test('Sync one translation: Auto Sync rewrites the EN and ES Docs, then their ne
   assert.ok(/Full sync started/.test(all) && /about 30 minutes/.test(all), all);
   assert.ok(g.__trig.some(t => t.getHandlerFunction() === 'buildAuditQueue'));
   assert.strictEqual(posts[posts.length - 1].action, 'run_manual');
+});
+
+test('sync refuses a KA that did not finish loading (Untitled / no text) and asks before shrinking a Doc', () => {
+  const long = 'Lead refunds explained in detail. '.repeat(120);
+  const files = {
+    d1: { folder: '1y-wucQGJ2i0y3VSfr1Hv4v-AK5GcNNQf', title: 'Smarter lead matching (New deal for pros) (Pro) - internal - Support Ops - EN',
+          description: 'KA_META:000014779|https://x/articles/Knowledge/Personalized-Preferences|2026-10-06 10:00\n', text: long },
+  };
+  const { g } = loadBackend({ files, props: { SHARED_SECRET: 's' } });
+  const base = { secret: 's', action: 'sync', kaId: '000014779', url: 'https://x/articles/Knowledge/Personalized-Preferences', reviewer: 'Jorge' };
+  const r1 = post(g, Object.assign({ title: 'Untitled', html: '<h1>Untitled</h1>' }, base));
+  assert.strictEqual(r1.code, 'EMPTY_KA'); assert.ok(/Nothing was changed/.test(r1.error));
+  const r2 = post(g, Object.assign({ title: 'Smarter lead matching (New deal for pros) (Pro)', html: '<h1>Smarter lead matching (New deal for pros) (Pro)</h1><p>Hi</p>' }, base));
+  assert.strictEqual(r2.code, 'EMPTY_KA');
+  assert.ok(!files.d1.updated && /^Smarter/.test(files.d1.title), 'the Doc was not touched');
+  const short = '<h1>Smarter lead matching</h1><p>' + 'Short new version of the article. '.repeat(10) + '</p>';
+  const r3 = post(g, Object.assign({ title: 'Smarter lead matching (New deal for pros) (Pro)', html: short }, base));
+  assert.strictEqual(r3.code, 'WOULD_SHRINK'); assert.ok(!files.d1.updated);
+  const r4 = post(g, Object.assign({ title: 'Smarter lead matching (New deal for pros) (Pro)', html: short, allowShrink: true }, base));
+  assert.ok(r4.ok, JSON.stringify(r4)); assert.strictEqual(files.d1.updated, 1);
+  const full = '<h1>Smarter lead matching</h1><p>' + long + '</p>';
+  const r5 = post(g, Object.assign({ title: 'Smarter lead matching (New deal for pros) (Pro)', html: full }, base));
+  assert.ok(r5.ok, JSON.stringify(r5));
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');
