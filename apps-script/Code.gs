@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.8.1)
+ * KA Sync v2 — Google Apps Script backend (v2.9.0)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,11 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.0
+ *   - <web app URL>?sync=translation&k=<key>: Auto Sync rewrites the EN and ES Docs
+ *     from Contentful now, then their text is copied for the re-audit.
+ *     ?sync=all: full Auto Sync, texts copied again ~30 minutes later.
  *
  * v2.8.1
  *   - <web app URL>?save=audit (no data): a page to paste all the dashboard's
@@ -148,7 +153,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.8.1';
+var CODE_VERSION = '2.9.0';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -1615,6 +1620,79 @@ function _pastePage() {
     '<' + '/script></body></html>';
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Sync one translation now (2.9.0): <web app URL>?sync=translation&k=<key>
+// For the dashboard's "⟳ Sync" button, after a fix is published in Contentful:
+// asks HC Auto Sync to rewrite the English and the Spanish Docs from Contentful
+// right away (its "sync_single"), then copies their new text into
+// translation_audit_queue, so the next score reads the fixed text.
+// ?sync=all starts a full Auto Sync and refreshes all the texts ~30 min later.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function _publishedLink(docId) {
+  try {
+    var h = DocumentApp.openById(docId).getHeader();
+    var m = (h ? h.getText() : '').match(/Published link:\s*(\S+)/i);
+    return m ? m[1] : '';
+  } catch (e) { return ''; }
+}
+
+function _queueRow(ss, row) {
+  var sh = ss.getSheetByName(TR_AUDIT_QUEUE_TAB);
+  var header = ['translationKey', 'titleEN', 'docIdEN', 'docIdES', 'enText', 'esText', 'enWords', 'esWords', 'preparedAt'];
+  if (!sh) { sh = ss.insertSheet(TR_AUDIT_QUEUE_TAB); sh.appendRow(header); }
+  var v = sh.getDataRange().getValues();
+  for (var i = 1; i < v.length; i++) if (String(v[i][0]) === String(row[0])) { sh.getRange(i + 1, 1, 1, row.length).setValues([row]); return; }
+  sh.appendRow(row);
+}
+
+function syncTranslation(key) {
+  try {
+    var ss = SpreadsheetApp.openById(CORPUS_SHEET_ID);
+    var tr = _tabObjects(ss.getSheetByName('localization_tracker')).rows.filter(function (r) { return String(r.translationKey) === String(key); })[0];
+    if (!tr) return { ok: false, message: 'No row for "' + key + '" in localization_tracker.' };
+    if (!tr.docIdEN || !tr.docIdES) return { ok: false, title: tr.titleEN, message: 'This row in localization_tracker has no ' + (!tr.docIdEN ? 'English' : 'Spanish') + ' Doc id (docId' + (!tr.docIdEN ? 'EN' : 'ES') + '). Add it, then try again.' };
+    var steps = [];
+    var props = PropertiesService.getScriptProperties();
+    var configured = !!(props.getProperty('AUTO_SYNC_URL') && props.getProperty('AUTO_SYNC_SECRET'));
+    [['English', String(tr.docIdEN)], ['Spanish', String(tr.docIdES)]].forEach(function (x) {
+      if (!configured) { steps.push(x[0] + ': Auto Sync not set up (AUTO_SYNC_URL / AUTO_SYNC_SECRET), so the Doc was not refreshed'); return; }
+      var url = _publishedLink(x[1]);
+      if (!url) { steps.push(x[0] + ': the Doc has no "Published link" in its header, so Auto Sync can\'t refresh it'); return; }
+      var r;
+      try { r = _autoSyncPost({ action: 'sync_single', url: url }); } catch (e) { r = { ok: false, error: String(e && e.message || e) }; }
+      steps.push(x[0] + ': ' + (r && r.ok ? 'Doc refreshed from Contentful' : 'Auto Sync could not refresh it (' + ((r && (r.error || r.code)) || 'no answer') + ')'));
+    });
+    var en = _docText(String(tr.docIdEN)), es = _docText(String(tr.docIdES));
+    var now = Utilities.formatDate(new Date(), LOCAL_TZ, 'yyyy-MM-dd HH:mm');
+    _queueRow(ss, [tr.translationKey, tr.titleEN || '', String(tr.docIdEN), String(tr.docIdES), en, es,
+      en.split(/\s+/).filter(String).length, es.split(/\s+/).filter(String).length, now]);
+    steps.push('Text copied for the audit (' + now + ')');
+    var good = steps.filter(function (s) { return /refreshed from Contentful/.test(s); }).length === 2;
+    return { ok: true, title: tr.titleEN || key, steps: steps, good: good };
+  } catch (err) {
+    return { ok: false, message: String(err && err.message || err) };
+  }
+}
+
+function syncAllTranslations() {
+  var all = _autoSyncRunAll();
+  ScriptApp.newTrigger('buildAuditQueue').timeBased().after(30 * 60 * 1000).create();
+  return { ok: true, steps: [all || 'Auto Sync is not set up (AUTO_SYNC_URL / AUTO_SYNC_SECRET): the Docs were not refreshed', 'All the texts for the audit will be copied again in about 30 minutes (buildAuditQueue).'] };
+}
+
+function _syncPage(r, all) {
+  var css = '<style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;background:#f7f7f8;color:#2f3033;margin:0;padding:24px 16px}' +
+    '.c{background:#fff;border:1px solid #e3e6e8;border-radius:10px;padding:24px 26px;max-width:560px;margin:0 auto}h1{font-size:21px;margin:0 0 8px}' +
+    'p,li{margin:6px 0;line-height:1.5}.ok{color:#1b7a43}.bad{color:#c22d2d}.warn{color:#9a5b00}.muted{color:#6b7280;font-size:13px}</style>';
+  var body = !r.ok ? '<h1 class="bad">Could not sync</h1>' + (r.title ? '<p><b>' + _esc(r.title) + '</b></p>' : '') + '<p>' + _esc(r.message) + '</p>'
+    : '<h1 class="' + (all || r.good ? 'ok' : 'warn') + '">' + (all ? '✓ Full sync started' : r.good ? '✓ Synced' : 'Synced, with a warning') + '</h1>' + (r.title ? '<p><b>' + _esc(r.title) + '</b></p>' : '') +
+      '<ul>' + r.steps.map(function (s) { return '<li>' + _esc(s) + '</li>'; }).join('') + '</ul>' +
+      '<p class="muted">' + (all ? 'You can close this tab.' : 'Close this tab and click the score in the dashboard to score it again.') + '</p>';
+  return '<!DOCTYPE html><html><head><meta charset="utf-8">' + css + '</head><body><div class="c">' + body + '</div>' +
+    (r.ok && !all ? '<script>setTimeout(function(){ try { window.close(); } catch (e) {} }, 4000);<' + '/script>' : '') + '</body></html>';
+}
+
 function _savePage(r, d) {
   var css = '<style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;background:#f7f7f8;color:#2f3033;margin:0;padding:24px 16px}' +
     '.c{background:#fff;border:1px solid #e3e6e8;border-radius:10px;padding:24px 26px;max-width:640px;margin:0 auto}h1{font-size:21px;margin:0 0 10px}' +
@@ -2128,6 +2206,12 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.refresh === 'contentful') {
     return HtmlService.createHtmlOutput(_refreshPage(refreshContentfulNow()))
       .setTitle('Update from Contentful').addMetaTag('viewport', 'width=device-width, initial-scale=1');
+  }
+  // <web app URL>?sync=translation&k=<key> | ?sync=all -> the dashboard's Sync buttons
+  if (e && e.parameter && (e.parameter.sync === 'translation' || e.parameter.sync === 'all')) {
+    var allSync = e.parameter.sync === 'all';
+    return HtmlService.createHtmlOutput(_syncPage(allSync ? syncAllTranslations() : syncTranslation(String(e.parameter.k || '')), allSync))
+      .setTitle('Sync').addMetaTag('viewport', 'width=device-width, initial-scale=1');
   }
   // <web app URL>?save=audit&d=<results>[&go=1] -> save the dashboard's new translation scores to localization_tracker
   if (e && e.parameter && e.parameter.save === 'audit') {

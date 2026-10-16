@@ -90,7 +90,7 @@ function loadBackend(opts) {
       openById(id) {
         const f = files[id];
         if (!f) throw new Error('no doc ' + id);
-        return { getBody: () => ({ getText: () => f.text || '' }), getHeader: () => (f.headerVersion ? { getText: () => 'Published link: x\nVersion: ' + f.headerVersion + '\n' } : null) };
+        return { getBody: () => ({ getText: () => f.text || '' }), getHeader: () => (f.header ? { getText: () => f.header } : f.headerVersion ? { getText: () => 'Published link: x\nVersion: ' + f.headerVersion + '\n' } : null) };
       },
     },
     MailApp: { sendEmail: (m) => mails.push(m) },
@@ -426,13 +426,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.8.1');
+  assert.strictEqual(v.server, '2.9.0');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.8.1');
+  assert.strictEqual(bad.server, '2.9.0');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.8.1');
+  assert.strictEqual(get.server, '2.9.0');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -642,6 +642,40 @@ test('re-audit: buildAuditQueue copies the EN/ES Doc text (and the old scores on
   // bad input
   assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: enc([{ k: 'x', s: 300 }]) } }).html));
   assert.ok(/Could not save/.test(g.doGet({ parameter: { save: 'audit', d: 'garbage' } }).html));
+});
+
+test('Sync one translation: Auto Sync rewrites the EN and ES Docs, then their new text goes to the audit queue', () => {
+  const files = { en1: { text: 'old EN', header: 'Published link: https://help.thumbtack.com/article/card-charges\nSlug: card-charges' },
+    es1: { text: 'old ES', header: 'Published link: https://help.thumbtack.com/article/cobros-tarjeta' } };
+  const posts = [];
+  const fetch = (url, o) => { const b = JSON.parse(o.payload); posts.push(b);
+    if (b.action === 'sync_single'){ (b.url.includes('cobros') ? files.es1 : files.en1).text = 'NEW ' + (b.url.includes('cobros') ? 'ES' : 'EN') + ' text'; return { body: { ok: true } }; }
+    return { body: { ok: true } }; };
+  const { g, sheets } = loadBackend({ files, fetch, props: { AUTO_SYNC_URL: 'https://script.google.com/macros/s/AUTO/exec', AUTO_SYNC_SECRET: 's' } });
+  const tr = g.SpreadsheetApp.openById('x').insertSheet('localization_tracker');
+  tr.appendRow(['translationKey', 'titleEN', 'docIdEN', 'docIdES', 'aiScore']);
+  tr.appendRow(['how my card is charged for leads', 'How my card is charged for leads', 'en1', 'es1', 71]);
+  tr.appendRow(['no es', 'No ES', 'en1', '', '']);
+  g.buildAuditQueue();
+  assert.strictEqual(sheets.translation_audit_queue.data()[1][5], 'old ES');
+  const page = g.doGet({ parameter: { sync: 'translation', k: 'how my card is charged for leads' } }).html;
+  assert.ok(/✓ Synced/.test(page) && /English: Doc refreshed from Contentful/.test(page) && /Spanish: Doc refreshed from Contentful/.test(page), page);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(posts.map(p => [p.action, p.url]))), [['sync_single', 'https://help.thumbtack.com/article/card-charges'], ['sync_single', 'https://help.thumbtack.com/article/cobros-tarjeta']]);
+  const q = sheets.translation_audit_queue.data();
+  assert.strictEqual(q.length, 2, 'the same row is updated, not a new one');
+  assert.deepStrictEqual([q[1][4], q[1][5]], ['NEW EN text', 'NEW ES text']);
+  assert.ok(/no Spanish Doc id/.test(g.doGet({ parameter: { sync: 'translation', k: 'no es' } }).html));
+  assert.ok(/No row for/.test(g.doGet({ parameter: { sync: 'translation', k: 'nope' } }).html));
+  // not set up: still copies the text, and says the Docs were not refreshed
+  const n = loadBackend({ files });
+  const tr2 = n.g.SpreadsheetApp.openById('x').insertSheet('localization_tracker'); tr2.appendRow(['translationKey', 'titleEN', 'docIdEN', 'docIdES']); tr2.appendRow(['k', 'K', 'en1', 'es1']);
+  const p2 = n.g.doGet({ parameter: { sync: 'translation', k: 'k' } }).html;
+  assert.ok(/with a warning/.test(p2) && /Auto Sync not set up/.test(p2) && /Text copied/.test(p2), p2);
+  // sync all: full Auto Sync + texts again later
+  const all = g.doGet({ parameter: { sync: 'all' } }).html;
+  assert.ok(/Full sync started/.test(all) && /about 30 minutes/.test(all), all);
+  assert.ok(g.__trig.some(t => t.getHandlerFunction() === 'buildAuditQueue'));
+  assert.strictEqual(posts[posts.length - 1].action, 'run_manual');
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');
