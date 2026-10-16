@@ -138,3 +138,7 @@ Para arreglar los cuatro Docs: abre cada KA en Salesforce, espera que cargue com
 ## Guardar el score de un artículo que no está en localization_tracker (Code.gs 2.9.2)
 
 La página de guardar saltaba los artículos sin fila en `localization_tracker` ("1 not in localization_tracker (skipped)"). Ahora el dashboard manda también el título, los Doc ids y la audiencia, y la página agrega la fila nueva con aiScore, auditedDate y notes (status queda vacío). En el dashboard, arriba del botón Copy, sale la lista de lo que se va a guardar.
+
+## El Audit marca los Docs vacíos (Code.gs 2.9.3, admin 2.7.4)
+
+El Audit solo comparaba fechas, así que un Doc "Untitled" sin texto salía OK. Ahora es "Doc is empty" (rojo, arriba en la lista) y Fix from audit lo actualiza desde Salesforce.

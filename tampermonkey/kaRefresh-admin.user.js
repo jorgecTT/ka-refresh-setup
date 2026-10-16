@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.7.3
+// @version      2.7.4
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -104,7 +104,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.7.3';
+  const SCRIPT_VERSION = '2.7.4';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -1746,7 +1746,7 @@
 
   // Every flagged row of the last audit, with what the script can do about it.
   const FIX_ACTIONS = {
-    'In Salesforce, no Doc': 'create', 'Outdated': 'update', 'Extra Doc': 'archive',
+    'In Salesforce, no Doc': 'create', 'Outdated': 'update', 'Doc is empty': 'update', 'Extra Doc': 'archive',
     // older audits wrote the sheet in Spanish
     'En Salesforce sin Doc': 'create', 'Desactualizado': 'update', 'Doc de más': 'archive',
   };
@@ -2426,7 +2426,7 @@
   }
 
   const AUDIT_LABELS = [
-    ['MISSING_DOC', 'In Salesforce, no Doc'], ['ARCHIVED_BUT_ACTIVE', 'Archived by mistake'],
+    ['MISSING_DOC', 'In Salesforce, no Doc'], ['ARCHIVED_BUT_ACTIVE', 'Archived by mistake'], ['EMPTY_DOC', 'Doc is empty'],
     ['DUPLICATE_DOCS', 'Duplicate Docs'], ['OUTDATED', 'Outdated'], ['WRONG_TEAM', 'Different team'],
     ['EXTRA_DOC', 'Extra Doc (not in reports)'], ['NO_META', 'Doc without KA data'], ['OK', 'OK'],
   ];

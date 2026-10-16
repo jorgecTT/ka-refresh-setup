@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.9.2)
+ * KA Sync v2 — Google Apps Script backend (v2.9.3)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.3
+ *   - audit: a Doc that came out "Untitled" (a sync of a half-loaded KA) is EMPTY_DOC,
+ *     "Doc is empty", and Fix from audit updates it. Before it counted as OK.
  *
  * v2.9.2
  *   - save page: an article that has no row in localization_tracker yet gets one
@@ -163,7 +167,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.9.2';
+var CODE_VERSION = '2.9.3';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -692,6 +696,7 @@ var OUTDATED_TOLERANCE_MS = 10 * 60 * 1000;
 var AUDIT_STATUSES = [
   { key: 'MISSING_DOC',         label: 'In Salesforce, no Doc',          color: '#f4c7c3' },
   { key: 'ARCHIVED_BUT_ACTIVE', label: 'Archived by mistake',            color: '#f4c7c3' },
+  { key: 'EMPTY_DOC',           label: 'Doc is empty',                   color: '#f4c7c3' },
   { key: 'DUPLICATE_DOCS',      label: 'Duplicate Docs',                 color: '#fce8b2' },
   { key: 'OUTDATED',            label: 'Outdated',                       color: '#fce8b2' },
   { key: 'WRONG_TEAM',          label: 'Different team',                 color: '#fff2cc' },
@@ -815,6 +820,11 @@ function runAudit(reports, published, pubDocs, arcDocs, opts) {
         doc = matches[0];
         used[doc.docId] = true;
         var found = [];
+        // a sync of a KA that hadn't finished loading left the Doc "Untitled" and empty
+        if (/^\s*untitled\b/i.test(doc.title || '')) {
+          found.push('EMPTY_DOC');
+          notes.push('The Doc came out "Untitled" with no text from a sync: click Update on the KA');
+        }
         var sfMs = ka.lastModified ? Date.parse(ka.lastModified) : 0;
         if (sfMs && doc.modifiedMs && sfMs - doc.modifiedMs > OUTDATED_TOLERANCE_MS) {
           // Salesforce changed after the last sync. The version number alone

@@ -427,13 +427,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.9.2');
+  assert.strictEqual(v.server, '2.9.3');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.9.2');
+  assert.strictEqual(bad.server, '2.9.3');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.9.2');
+  assert.strictEqual(get.server, '2.9.3');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -709,6 +709,17 @@ test('sync refuses a KA that did not finish loading (Untitled / no text) and ask
   const full = '<h1>Smarter lead matching</h1><p>' + long + '</p>';
   const r5 = post(g, Object.assign({ title: 'Smarter lead matching (New deal for pros) (Pro)', html: full }, base));
   assert.ok(r5.ok, JSON.stringify(r5));
+});
+
+test('audit: a Doc that came out "Untitled" is "Doc is empty" (not OK)', () => {
+  const fx = auditFixture();
+  fx.files.d1.title = 'Untitled - internal - GTM - EN';
+  const { g, sheets } = loadBackend({ files: fx.files, props: { SHARED_SECRET: 's' } });
+  const r = post(g, { secret: 's', action: 'audit', reports: fx.reports, published: fx.published, by: 'Jorge' });
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.strictEqual(r.counts.EMPTY_DOC, 1); assert.strictEqual(r.counts.OK, 2);
+  const row = sheets.ka_audit.data().find(x => x[0] === 'Doc is empty');
+  assert.ok(row && /Untitled/.test(row.join(' ')), JSON.stringify(row));
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');
