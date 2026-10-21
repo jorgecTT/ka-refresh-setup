@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.7.4
+// @version      2.7.5
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -36,6 +36,10 @@
  *   root-relative "/articles/Knowledge/..." cross-article links (which Drive
  *   silently dropped) now form in the Doc. Fragment "#..." jumps (TOC / section
  *   anchors) still become colored spans; mailto:/tel: are left untouched.
+ *
+ * v2.7.5 - KAs whose layout has no Last Modified fields (Trust & Safety) now
+ *   save the Last Published Date, and who made the viewed version (Versions
+ *   tab), instead of "Not listed".
  *
  * v2.1.0 - "Test 5" / "Refresh all" batch buttons (re-sync every KA listed in
  *   the ka_published tab, one by one in this tab).
@@ -104,7 +108,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.7.4';
+  const SCRIPT_VERSION = '2.7.5';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -255,6 +259,20 @@
       const v = findValueFor('Last Modified Date', true);
       if (v) simpleFields['Last Modified Date'] = v;
     }
+    // Some layouts (Trust & Safety KAs) have no "Last Modified" fields: use the
+    // "Last Published Date" in the header, and who made the version being viewed
+    // from the Versions tab ("2 (viewing) | Nathan Pratt | published article as new").
+    if (!simpleFields['Last Modified Date']) {
+      const v = findValueFor('Last Published Date', true);
+      if (v) simpleFields['Last Published Date'] = v;
+    }
+    walkAll(document, (el) => {
+      if (simpleFields['Viewing Version By']) return;
+      if ((el.tagName || '').toUpperCase() !== 'TR') return;
+      const cells = [...el.children].map(c => (c.innerText || '').trim());
+      const i = cells.findIndex(t => /\(viewing\)/i.test(t));
+      if (i >= 0 && cells[i + 1] && !/\d{1,2}\/\d{1,2}\/\d{4}/.test(cells[i + 1])) simpleFields['Viewing Version By'] = cells[i + 1].split('\n')[0].slice(0, 120);
+    }, 0);
 
     walkAll(document, (el) => {
       if (simpleFields['Last Modified By Full']) return;
@@ -314,7 +332,10 @@
         return date;
       }
     }
-    return (simpleFields['Last Modified Date'] || 'Not listed').trim();
+    if (simpleFields['Last Modified Date']) return simpleFields['Last Modified Date'].trim();
+    const pub = (simpleFields['Last Published Date'] || '').trim();
+    if (pub) return pub + (simpleFields['Viewing Version By'] ? ' by ' + simpleFields['Viewing Version By'] : '');
+    return 'Not listed';
   }
 
   function toSlugUrl(simpleFields, fallbackUrl) {
