@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA Refresh - Sync to Drive
 // @namespace    https://thumbtack.com/
-// @version      2.7.5
+// @version      2.7.6
 // @updateURL    https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @downloadURL  https://raw.githubusercontent.com/jorgectt/ka-refresh-setup/claude/code-web-vs-desktop-fx3w97/tampermonkey/kaRefresh-admin.user.js
 // @description  One-click sync of the current Salesforce KA to its Google Doc, batch refresh, and the weekly Content Index audit (admin copy).
@@ -36,6 +36,10 @@
  *   root-relative "/articles/Knowledge/..." cross-article links (which Drive
  *   silently dropped) now form in the Doc. Fragment "#..." jumps (TOC / section
  *   anchors) still become colored spans; mailto:/tel: are left untouched.
+ *
+ * v2.7.6 - "Refresh missing dates" button: re-syncs only the KAs whose Doc has
+ *   no Salesforce date. On layouts with no Last Modified By, Update and the
+ *   batches open the Versions tab to read who made the version, then go back.
  *
  * v2.7.5 - KAs whose layout has no Last Modified fields (Trust & Safety) now
  *   save the Last Published Date, and who made the viewed version (Versions
@@ -108,7 +112,7 @@
   ];
   const AUDIENCES = ['Support Ops', 'GTM', 'Trust & Safety'];
   const KA_URL_PATTERN = /\/lightning\/r\/Knowledge__kav\//;
-  const SCRIPT_VERSION = '2.7.5';
+  const SCRIPT_VERSION = '2.7.6';
 
   const K_REVIEWER = 'KAR2_reviewer';
   const K_SECRET = 'KAR2_secret';
@@ -741,11 +745,37 @@
     return null;
   }
 
+  // Layouts with no "Last Modified By" (Trust & Safety): read who made the viewed
+  // version from the Versions tab, then go back to Details so the article text stays loaded.
+  function _tabNamed(name) {
+    let hit = null;
+    walkAll(document, (el) => {
+      if (hit || !el.tagName) return;
+      const role = el.getAttribute && el.getAttribute('role');
+      if ((role === 'tab' || el.tagName === 'A') && (el.innerText || '').trim() === name) hit = el;
+    }, 0);
+    return hit;
+  }
+  async function _addVersionAuthor(ka) {
+    if (!ka || / by /.test(ka.lastModified || '') || /^not listed$/i.test(ka.lastModified || '')) return ka;
+    const versions = _tabNamed('Versions'), details = _tabNamed('Details');
+    if (!versions || !details) return ka;
+    versions.click();
+    let by = '';
+    for (let i = 0; i < 12 && !by; i++) { await sleep(400); by = extractSimpleFields()['Viewing Version By'] || ''; }
+    details.click();
+    const back = await _readKaReady(20);
+    const out = back || ka;
+    if (by && !/ by /.test(out.lastModified || '')) out.lastModified = (out.lastModified || ka.lastModified) + ' by ' + by;
+    return out;
+  }
+
   async function _performSync(ka, mode, reviewer, audience, allowShrink) {
     if (!_kaReady(ka)) {
       setStatus('error', 'The KA hasn\u2019t finished loading (no title or no article text yet). Nothing was synced. Wait a few seconds and click again.');
       return;
     }
+    if (!allowShrink) ka = await _addVersionAuthor(ka);
     setStatus('loading', 'Normalizing HTML\u2026');
     const html = normalizeKaHtml(ka.richFields, ka.title);
     setStatus('loading', (mode === 'create' ? 'Creating' : 'Updating') + ' Doc\u2026');
@@ -860,6 +890,8 @@
     #kar-batch-btn { background: #2DB783; color: #fff; }
     #kar-batch-btn:hover:not(:disabled) { background: #269E70; }
     #kar-outdated-btn { background: #E8912D; color: #fff; }
+    #kar-nodate-btn { background: #5B7FBF; color: #fff; }
+    #kar-nodate-btn:hover:not(:disabled) { background: #4A6BA6; }
     #kar-outdated-btn:hover:not(:disabled) { background: #CC7A1C; }
     #kar-fix-btn { background: #1E8E3E; color: #fff; }
     #kar-fix-btn:hover:not(:disabled) { background: #176F30; }
@@ -1512,6 +1544,7 @@
       '<button class="kar-main-btn" id="kar-new-btn">+ New</button>' +
       '<button class="kar-main-btn" id="kar-outdated-btn">\u27F3 Refresh outdated</button>' +
       '<button class="kar-main-btn" id="kar-batch-btn">\u27F3 Refresh all</button>' +
+      '<button class="kar-main-btn" id="kar-nodate-btn" title="Re-sync only the KAs whose Doc has no Salesforce date (Not saved in the dashboard)">\u27F3 Refresh missing dates</button>' +
       '<button class="kar-main-btn" id="kar-audit-btn">\uD83D\uDCCB Audit</button>' +
       '<button class="kar-main-btn" id="kar-weekly-btn">\uD83D\uDCC5 Weekly report</button>' +
       '<button class="kar-main-btn" id="kar-fix-btn">\u2713 Fix from audit</button>' +
@@ -1526,13 +1559,14 @@
     document.getElementById('kar-ufd-btn').addEventListener('click', () => UFD.run());
     document.getElementById('kar-batch-btn').addEventListener('click', () => startBatch(0));
     document.getElementById('kar-outdated-btn').addEventListener('click', () => startBatch(0, 'outdated'));
+    document.getElementById('kar-nodate-btn').addEventListener('click', () => startBatch(0, 'nodate'));
     document.getElementById('kar-audit-btn').addEventListener('click', () => startAudit());
     document.getElementById('kar-weekly-btn').addEventListener('click', () => startWeekly());
     document.getElementById('kar-fix-btn').addEventListener('click', () => openFixList());
   }
 
   function setButtonsDisabled(disabled) {
-    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-audit-btn', 'kar-weekly-btn', 'kar-fix-btn']) {
+    for (const id of ['kar-update-btn', 'kar-new-btn', 'kar-outdated-btn', 'kar-batch-btn', 'kar-nodate-btn', 'kar-audit-btn', 'kar-weekly-btn', 'kar-fix-btn']) {
       const b = document.getElementById(id);
       if (b) b.disabled = disabled;
     }
@@ -1724,9 +1758,9 @@
           const rows = parseCsv(t);
           const header = (rows.shift() || []).map((h) => h.trim());
           const uCol = header.indexOf('salesforceUrl');
-          const tCol = header.indexOf('title');
+          const tCol = header.indexOf('title'), mCol = header.indexOf('lastModifiedSF');
           if (uCol === -1) { reject(new Error('ka_published has no salesforceUrl column')); return; }
-          const list = rows.map((r) => ({ url: (r[uCol] || '').trim(), title: (r[tCol] || '').trim() }))
+          const list = rows.map((r) => ({ url: (r[uCol] || '').trim(), title: (r[tCol] || '').trim(), sfDate: mCol === -1 ? 'x' : (r[mCol] || '').trim() }))
             .filter((x) => /^https?:\/\//.test(x.url));
           resolve(list);
         },
@@ -1877,13 +1911,15 @@
     const reviewer = await ensureReviewer();
     if (!reviewer) return;
     if (!(await ensureSecret())) return;
-    const outdated = source === 'outdated';
+    const outdated = source === 'outdated', nodate = source === 'nodate';
     setStatus('loading', outdated ? 'Loading the outdated KAs from the last audit\u2026' : 'Loading the KA list\u2026');
     let list;
     try { list = outdated ? await fetchOutdatedList() : await fetchPublishedList(); } catch (e) { setStatus('error', e.message); return; }
+    // "Refresh missing dates": only the KAs whose Doc has no Salesforce date yet
+    if (nodate) list = list.filter((x) => !x.sfDate);
     if (limit) list = list.slice(0, limit);
     if (!list.length) {
-      setStatus(outdated ? 'success' : 'error', outdated ? 'Nothing outdated in the last audit.' : 'The list is empty.');
+      setStatus(outdated || nodate ? 'success' : 'error', outdated ? 'Nothing outdated in the last audit.' : nodate ? 'Every KA already has its Salesforce date.' : 'The list is empty.');
       return;
     }
     const mins = Math.max(1, Math.ceil((list.length * 8) / 60));
@@ -1892,7 +1928,7 @@
       'Keep this tab on Salesforce and don\u2019t close it.')) {
       setStatus('idle', 'Cancelled.'); return;
     }
-    setBatch({ active: true, list, idx: 0, reviewer, ok: 0, fail: 0, skip: 0, source: outdated ? 'outdated' : 'all' });
+    setBatch({ active: true, list, idx: 0, reviewer, ok: 0, fail: 0, skip: 0, source: outdated ? 'outdated' : nodate ? 'nodate' : 'all' });
     location.href = list[0].url;
   }
 
@@ -1917,6 +1953,7 @@
       await sleep(500);
     }
 
+    if (ka) ka = await _addVersionAuthor(ka);
     if (ka) {
       setBatchStatus(b, 'Syncing ' + (b.idx + 1) + '/' + b.list.length, ka.title);
       try {
