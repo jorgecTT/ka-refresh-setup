@@ -427,13 +427,13 @@ test('weekly report: updates (new version / minor edit), new and archived KAs, a
 test('every answer says which Code.gs is running; ?version=1 shows it in the browser', () => {
   const { g } = loadBackend({ props: { SHARED_SECRET: 's' } });
   const v = post(g, { secret: 's', action: 'version' });
-  assert.strictEqual(v.server, '2.9.3');
+  assert.strictEqual(v.server, '2.9.4');
   assert.ok(v.actions.includes('weekly'));
   const bad = post(g, { secret: 's', action: 'nope' });
   assert.strictEqual(bad.code, 'BAD_ACTION');
-  assert.strictEqual(bad.server, '2.9.3');
+  assert.strictEqual(bad.server, '2.9.4');
   const get = JSON.parse(g.doGet({ parameter: { version: '1' } }).text);
-  assert.strictEqual(get.server, '2.9.3');
+  assert.strictEqual(get.server, '2.9.4');
 });
 
 test('Contentful: last change of each article counts its segments, who did it, shared segments', () => {
@@ -720,6 +720,22 @@ test('audit: a Doc that came out "Untitled" is "Doc is empty" (not OK)', () => {
   assert.strictEqual(r.counts.EMPTY_DOC, 1); assert.strictEqual(r.counts.OK, 2);
   const row = sheets.ka_audit.data().find(x => x[0] === 'Doc is empty');
   assert.ok(row && /Untitled/.test(row.join(' ')), JSON.stringify(row));
+});
+
+test('sync saves who changed the KA in Salesforce as KA_BY, and drops it when there is no name', () => {
+  const long = 'Stripe steps for specialists. '.repeat(80);
+  const files = { d1: { folder: '1y-wucQGJ2i0y3VSfr1Hv4v-AK5GcNNQf', title: 'Navigate Stripe - internal - Trust & Safety - EN',
+    description: 'KA_META:000015213|https://x/articles/Knowledge/Navigate-Stripe|not listed\nKA_BY:Old Name\n2026-10-07 — Jorge (v2 created)\n', text: long } };
+  const { g } = loadBackend({ files, props: { SHARED_SECRET: 's' } });
+  const base = { secret: 's', action: 'sync', kaId: '000015213', url: 'https://x/articles/Knowledge/Navigate-Stripe', reviewer: 'Jorge',
+    title: 'Navigate Stripe', html: '<h1>Navigate Stripe</h1><p>' + long + '</p>' };
+  assert.ok(post(g, Object.assign({ lastModified: '6/29/2026 10:47 AM by Nathan Pratt' }, base)).ok);
+  const d = files.d1.description;
+  assert.ok(/^KA_META:000015213\|[^|\n]*\|2026-06-29 10:47\nKA_BY:Nathan Pratt\n/.test(d), d);
+  assert.strictEqual((d.match(/KA_BY:/g) || []).length, 1, d);
+  assert.ok(/2026-10-07 — Jorge \(v2 created\)/.test(d), 'the log is kept');
+  assert.ok(post(g, Object.assign({ lastModified: '6/29/2026 10:47 AM' }, base)).ok);
+  assert.ok(!/KA_BY:/.test(files.d1.description), files.d1.description);
 });
 
 if (require.main === module) console.log('\n' + passed + ' passed');

@@ -1,5 +1,5 @@
 /**
- * KA Sync v2 — Google Apps Script backend (v2.9.3)
+ * KA Sync v2 — Google Apps Script backend (v2.9.4)
  *
  * PRODUCTION backend for the simplified architecture:
  *
@@ -26,6 +26,10 @@
  *   - "Current refresh" date uses Pacific time instead of UTC.
  *   - NEW: weekly Content Index audit (action 'audit'), written to the
  *     ka_audit tab, logged in ka_audit_log and emailed; weekly reminder.
+ *
+ * v2.9.4
+ *   - sync: who changed the KA in Salesforce goes in the Drive description as KA_BY,
+ *     so the dashboard can show it (Drive exports leave the Doc's page header out).
  *
  * v2.9.3
  *   - audit: a Doc that came out "Untitled" (a sync of a half-loaded KA) is EMPTY_DOC,
@@ -167,7 +171,7 @@ var PAGE_HEADER_STYLE = { font: 'Montserrat', size: 8, color: '#999999' };
 
 // Dates written into Docs, the audit tab and emails.
 var LOCAL_TZ = 'America/Los_Angeles';
-var CODE_VERSION = '2.9.3';
+var CODE_VERSION = '2.9.4';
 var CODE_ACTIONS = ['checkKA', 'sync', 'archive', 'audit', 'auditDocs', 'weekly', 'version'];
 
 // The secret lives in Script Properties, never in the code.
@@ -389,7 +393,7 @@ function handleSync(req, t0) {
   var newFile = DriveApp.getFileById(fileId);
   var logEntry = today + ' — ' + req.reviewer + (mode === 'create' ? ' (v2 created)' : ' (v2 sync)');
   updateDescriptionLog(newFile, logEntry, req.kaId || '', canonicalUrl,
-    normalizeTimestamp(req.lastModified || ''));
+    normalizeTimestamp(req.lastModified || ''), _lastModifiedBy(req.lastModified || ''));
   nameCurrentVersion(fileId, (mode === 'create' ? 'Created ' : 'Sync ') + today);
 
   return {
@@ -485,7 +489,7 @@ function _readPrevRefresh(file, fileId) {
     var lines = desc.split('\n');
     for (var i = 0; i < lines.length; i++) {
       var line = lines[i].trim();
-      if (!line || line.indexOf('KA_META:') === 0) continue;
+      if (!line || line.indexOf('KA_META:') === 0 || line.indexOf('KA_BY:') === 0) continue;
       var m = line.match(/^(\d{4}-\d{2}-\d{2})\s*(?:—|-)\s*([^(]+)/);
       if (m) return { date: m[1], reviewer: m[2].trim() };
     }
@@ -554,11 +558,22 @@ function buildFilename(title, audience) {
   return title + ' - internal - ' + audience + ' - EN';
 }
 
-function updateDescriptionLog(file, newLine, kaId, kaUrl, lastModTs) {
+// "6/29/2026 10:47 AM by Nathan Pratt" -> "Nathan Pratt" ('' when there is no name)
+function _lastModifiedBy(lastModified) {
+  var m = String(lastModified || '').match(/\sby\s+(.+?)\s*$/i);
+  return m ? m[1].replace(/[\r\n|]+/g, ' ').trim().slice(0, 80) : '';
+}
+
+// The description starts with KA_META (id|url|last modified), then KA_BY (who
+// made that change in Salesforce, when known), then the refresh log, newest first.
+// The Doc's page header has the same, but Drive exports leave the header out,
+// so the dashboard reads these lines.
+function updateDescriptionLog(file, newLine, kaId, kaUrl, lastModTs, lastModBy) {
   try {
     var current = file.getDescription() || '';
-    current = current.replace(/^KA_META:[^\n]*\n/, '');
-    var meta = 'KA_META:' + (kaId || '') + '|' + (kaUrl || '') + '|' + (lastModTs || '') + '\n';
+    current = current.replace(/^KA_META:[^\n]*\n/, '').replace(/^KA_BY:[^\n]*\n/, '');
+    var meta = 'KA_META:' + (kaId || '') + '|' + (kaUrl || '') + '|' + (lastModTs || '') + '\n' +
+      (lastModBy ? 'KA_BY:' + lastModBy + '\n' : '');
     var combined = meta + newLine + '\n' + current;
     if (combined.length > MAX_DESCRIPTION_CHARS) {
       var lines = combined.split('\n');
