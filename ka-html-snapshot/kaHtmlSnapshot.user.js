@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.0.0
+// @version      1.0.1
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -38,8 +38,13 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
+  // Personal copy only: the URL and key can be written here once. On first run they
+  // are copied into Tampermonkey's storage, so later updates (which come without
+  // them) keep working. Never put the key in the public repo.
+  const PRESET_URL = '', PRESET_KEY = '';
+  if (PRESET_URL && PRESET_KEY && !GM_getValue(K_KEY, '')) { GM_setValue(K_URL, PRESET_URL); GM_setValue(K_KEY, PRESET_KEY); }
   const API = '/services/data/v59.0/ui-api';
   const BOX_ORDER = ['KB Content', 'Related Content', 'MC Content', 'Additional Content', 'Support Content'];
   const sleep = ms => new Promise(r => setTimeout(r, ms));
