@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.0.1
+// @version      1.0.2
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -38,7 +38,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.2';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
   // Personal copy only: the URL and key can be written here once. On first run they
   // are copied into Tampermonkey's storage, so later updates (which come without
@@ -102,7 +102,7 @@
   async function htmlFields() {
     if (_fields) return _fields;
     const info = await uiGet(API + '/object-info/Knowledge__kav');
-    _fields = Object.values(info.fields || {}).filter(f => f.htmlFormatted).map(f => ({ api: f.apiName, label: f.label }));
+    _fields = Object.values(info.fields || {}).filter(f => f.htmlFormatted && !f.calculated && f.dataType !== 'Url' && !/full article url/i.test(f.label || '')).map(f => ({ api: f.apiName, label: f.label }));
     if (!_fields.length) throw new Error('No rich text fields found on Knowledge');
     return _fields;
   }
@@ -133,13 +133,20 @@
     GM_setValue(K_IDS, { at: Date.now(), map });
     return out;
   }
+  // The UI API sends rich text escaped (&lt;h1&gt;): turn it back into real HTML.
+  // Only when the value has no real tags, so already-raw HTML is left untouched.
+  function unescapeHtml(s) {
+    s = String(s || '');
+    if (/<[a-z!\/]/i.test(s) || !/&lt;[a-z!\/]/i.test(s)) return s;
+    const t = document.createElement('textarea'); t.innerHTML = s; return t.value;
+  }
   // One KA record with its rich text boxes exactly as stored
   async function readKa(id) {
     const fl = await htmlFields();
     const rec = await uiGet(API + '/records/' + id + '?optionalFields=' + fl.map(f => 'Knowledge__kav.' + f.api).join(',') + ',' + ['Title', 'ArticleNumber', 'UrlName', 'VersionNumber', 'LastModifiedDate', 'LastModifiedBy.Name'].map(f => 'Knowledge__kav.' + f).join(','));
     const f = rec.fields || {}, v = k => (f[k] && f[k].value != null ? f[k].value : '');
     const rank = l => { const k = BOX_ORDER.findIndex(o => new RegExp(o.replace(/ /g, '.?'), 'i').test(l)); return k < 0 ? 99 : k; };
-    const boxes = fl.map(x => ({ label: x.label, api: x.api, html: v(x.api) })).filter(b => b.html && String(b.html).trim()).sort((a, b) => rank(a.label) - rank(b.label));
+    const boxes = fl.map(x => ({ label: x.label, api: x.api, html: unescapeHtml(v(x.api)) })).filter(b => b.html && String(b.html).trim()).sort((a, b) => rank(a.label) - rank(b.label));
     return { id, urlName: v('UrlName'), kaNumber: v('ArticleNumber'), title: v('Title'), version: v('VersionNumber'), lastModified: v('LastModifiedDate'), lastModifiedBy: who(f.LastModifiedBy),
       html: boxes.map(b => '<!-- BOX: ' + String(b.label).replace(/--/g, '-') + ' (' + b.api + ') -->\n' + b.html + '\n<!-- /BOX -->').join('\n') };
   }
