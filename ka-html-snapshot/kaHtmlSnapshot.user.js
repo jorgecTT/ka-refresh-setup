@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.3.0
+// @version      1.3.1
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 
 /*
- * KA HTML SNAPSHOT v1.3.0
+ * KA HTML SNAPSHOT v1.3.1
  *
  * What it does:
  *   - "Save this KA's HTML": the KA you have open.
@@ -41,7 +41,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
   // Personal copy only: the URL and key can be written here once. On first run they
   // are copied into Tampermonkey's storage, so later updates (which come without
@@ -319,6 +319,10 @@
           const div = el.ownerDocument.createElement('div'); div.appendChild(top); el.after(div); touched.add(boxOf(el));
         }
         else if (o.op === 'rename') {
+          // second guard: never rename a link that starts or ends in the middle of a word ("r" + "efund policy")
+          if (el.tagName === 'A') { const blk = el.closest('p,li,td,div,summary,h1,h2,h3,h4') || el.parentElement, full = blk ? blk.textContent || '' : '', raw = el.textContent || '', at = full.indexOf(raw);
+            if (at >= 0 && (/[A-Za-z\u00C0-\u00FF]/.test(full[at - 1] || '') && /^[a-z\u00E0-\u00FF]/.test(raw) || /[A-Za-z\u00C0-\u00FF]$/.test(raw) && /^[a-z\u00E0-\u00FF]/.test(full[at + raw.length] || ''))) {
+              miss.push(o.what + ' (not done: the link starts or ends in the middle of a word, so changing it would break the word. Fix it by hand)'); continue; } }
           const w = el.ownerDocument.createTreeWalker(el, NodeFilter.SHOW_TEXT); let first = null, n;
           while ((n = w.nextNode())) { if (!n.nodeValue.trim()) continue; if (!first) { first = n; n.nodeValue = o.to; } else n.nodeValue = ''; }
           if (!first) { miss.push(o.what + ' (no text found)'); continue; } touched.add(boxOf(el));
