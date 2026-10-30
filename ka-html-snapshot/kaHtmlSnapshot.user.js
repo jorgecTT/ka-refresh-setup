@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.1.1
+// @version      1.2.0
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 
 /*
- * KA HTML SNAPSHOT v1.1.1
+ * KA HTML SNAPSHOT v1.2.0
  *
  * What it does:
  *   - "Save this KA's HTML": the KA you have open.
@@ -41,7 +41,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.1.1';
+  const VERSION = '1.2.0';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
   // Personal copy only: the URL and key can be written here once. On first run they
   // are copied into Tampermonkey's storage, so later updates (which come without
@@ -258,6 +258,16 @@
     while (el.firstChild) n.appendChild(el.firstChild);
     el.replaceWith(n); return n;
   }
+  // what a check counts in the boxes: anchors, dropdowns, tables, images, lists, text, and what the fixes remove
+  function metrics(boxes) {
+    const q = sel => boxes.reduce((n, b) => n + b.el.querySelectorAll(sel).length, 0);
+    const anchors = boxes.reduce((n, b) => n + new Set(Array.from(b.el.querySelectorAll('[id],a[name]')).flatMap(e => [e.id, e.getAttribute('name')]).filter(Boolean)).size, 0);
+    const links = boxes.flatMap(b => Array.from(b.el.querySelectorAll('a[href^="#"]')));
+    return { anchors, dropdowns: q('details'), tables: q('table'), images: q('img'), lists: q('ul,ol'),
+      text: boxes.reduce((n, b) => n + (b.el.textContent || '').replace(/\s/g, '').length, 0),
+      emptyLinks: links.filter(a => !fxKey(a.textContent) && !a.querySelector('img') && !a.id && !a.getAttribute('name')).length,
+      blank: links.filter(a => /_blank/i.test(a.getAttribute('target') || '')).length };
+  }
   async function applyFixes(data, say) {
     const boxes = contentBoxes();
     if (!boxes.length) { say(false, 'Click Edit first', 'Open the KA’s draft, click Edit, wait for the content boxes, then Apply fixes again.'); return; }
@@ -267,7 +277,9 @@
       say(false, 'Another KA', 'These fixes are for “' + data.ka + '” but this is “' + here.title + '”. Nothing was changed.'); return; }
     const all = sel => boxes.flatMap(b => Array.from(b.el.querySelectorAll(sel)).map(el => Object.assign(el, { _box: b })));
     const boxOf = el => boxes.find(b => b.el.contains(el));
-    const touched = new Set(), done = [], miss = [];
+    const touched = new Set(), done = [], miss = [], ok = new Set();
+    const before = metrics(boxes);
+    const count = s => all(s.tag).filter(e => fxKey(e.textContent) === s.text && (s.href == null || (e.getAttribute('href') || '') === s.href)).length;
     const find = s => {
       const c = all(s.tag).filter(e => fxKey(e.textContent) === s.text && (s.href == null || (e.getAttribute('href') || '') === s.href));
       if (c.length === s.of) return c[s.nth] || null;
@@ -275,7 +287,7 @@
     };
     // find every target first, so one change doesn't move the next one
     const ORDER = ['unwrap-toc', 'rename', 'href', 'hc-resolve', 'record-url', 'del-empty', 'no-blank', 'retag', 'del'];
-    const ops = data.ops.slice().sort((a, b) => ORDER.indexOf(a.op) - ORDER.indexOf(b.op)).map(o => ({ o, el: o.sel ? find(o.sel) : null }));
+    const ops = data.ops.slice().sort((a, b) => ORDER.indexOf(a.op) - ORDER.indexOf(b.op)).map(o => ({ o, el: o.sel ? find(o.sel) : null, n0: o.sel ? count(o.sel) : 0 }));
     for (const { o, el } of ops) {
       try {
         if (o.sel && !el) { miss.push(o.what + ' (not found: it may be fixed already)'); continue; }
@@ -309,29 +321,52 @@
             for (const rid of recs) { try { const r = await uiGet(API + '/records/' + rid + '?optionalFields=Knowledge__kav.UrlName'); un = (r.fields && r.fields.UrlName && r.fields.UrlName.value) || ''; } catch (e) { /* next */ } if (un) break; }
             const hasAnchor = hash.length > 1 && all('[id],a[name]').some(e => e.id === hash.slice(1) || e.getAttribute('name') === hash.slice(1));
             if (!un && hasAnchor) { to = hash; links.forEach(a => { a.setAttribute('href', to); a.removeAttribute('data-mce-href'); a.removeAttribute('target'); touched.add(boxOf(a)); });
-              done.push(o.what + ' → ' + to + ' (that record is gone, but this KA has the ' + hash + ' section: check it’s the right one)'); continue; }
+              ok.add(o); done.push(o.what + ' → ' + to + ' (that record is gone, but this KA has the ' + hash + ' section: check it’s the right one)'); continue; }
             if (!un) { miss.push(o.what + ' (Salesforce doesn’t know that record anymore: fix it by hand)'); continue; }
             to = here && String(here.urlName).toLowerCase() === un.toLowerCase() && hash ? hash : '/articles/Knowledge/' + un + hash;
           }
           links.forEach(a => { a.setAttribute('href', to); a.removeAttribute('data-mce-href'); touched.add(boxOf(a)); });
-          done.push(o.what + (o.op === 'href' ? '' : ' → ' + to)); continue;
+          ok.add(o); done.push(o.what + (o.op === 'href' ? '' : ' → ' + to)); continue;
         }
         else if (o.op === 'del-empty') {
           const e = all('a[href^="#"]').filter(a => !fxKey(a.textContent) && !a.querySelector('img') && !a.id && !a.getAttribute('name'));
-          e.forEach(a => { touched.add(boxOf(a)); a.remove(); }); done.push('Deleted ' + e.length + ' empty link' + (e.length === 1 ? '' : 's')); continue;
+          e.forEach(a => { touched.add(boxOf(a)); a.remove(); }); ok.add(o); done.push('Deleted ' + e.length + ' empty link' + (e.length === 1 ? '' : 's')); continue;
         }
         else if (o.op === 'no-blank') {
           const e = all('a[href^="#"][target]').filter(a => /_blank/i.test(a.getAttribute('target'))); e.forEach(a => { a.removeAttribute('target'); a.removeAttribute('rel'); touched.add(boxOf(a)); });
-          done.push('“Open in a new tab” removed from ' + e.length + ' link' + (e.length === 1 ? '' : 's')); continue;
+          ok.add(o); done.push('“Open in a new tab” removed from ' + e.length + ' link' + (e.length === 1 ? '' : 's')); continue;
         }
         else { miss.push(o.what + ' (unknown change)'); continue; }
-        done.push(o.what);
+        ok.add(o); done.push(o.what);
       } catch (e) { miss.push(o.what + ' (error: ' + (e && e.message || e) + ')'); }
     }
     touched.forEach(b => b && b.el.dispatchEvent(new Event('input', { bubbles: true })));
     say(done.length > 0, done.length + ' of ' + data.ops.length + ' fixes made', done.map(esc).join('<br>'));
     if (miss.length) say(false, miss.length + ' not made', miss.map(esc).join('<br>'));
-    say(true, 'Next', 'Review the boxes, then click <b>Save</b> yourself. Nothing was saved. After you publish, click ↑ Update (or Save this KA’s HTML) and Check all again in the dashboard.');
+    // ---- double check: read the boxes again and confirm each change is really there, and that nothing else was lost ----
+    const after = metrics(boxes), bad = [], good = [];
+    const toc = /\(\s*table of contents\s*\)/ig;
+    for (const { o, n0 } of ops) {
+      if (!ok.has(o)) continue;
+      let yes = true;
+      if (o.op === 'retag') yes = count(o.sel) === n0 - 1 && all(o.to).some(e => fxKey(e.textContent) === o.sel.text);
+      else if (o.op === 'del') yes = count(o.sel) === n0 - 1;
+      else if (o.op === 'unwrap-toc') { const t = fxKey(o.sel.text.replace(toc, '')); yes = all(o.sel.tag).some(e => fxKey(e.textContent) === t && !e.querySelector('a[href="#contents"]')); }
+      else if (o.op === 'rename') yes = all('a').some(e => (e.getAttribute('href') || '') === o.sel.href && fxKey(e.textContent) === fxKey(o.to));
+      else if (o.op === 'href' || o.op === 'hc-resolve' || o.op === 'record-url') yes = !all('a[href]').some(e => e.getAttribute('href') === (o.op === 'href' ? o.from : o.href));
+      else if (o.op === 'del-empty') yes = after.emptyLinks === 0;
+      else if (o.op === 'no-blank') yes = after.blank === 0;
+      (yes ? good : bad).push(o.what);
+    }
+    const expText = ops.filter(x => ok.has(x.o) && x.o.op === 'rename').reduce((n, x) => n + fxKey(x.o.to).replace(/\s/g, '').length - x.o.sel.text.replace(/\s/g, '').length, 0);
+    const lost = [];
+    if (after.anchors < before.anchors) lost.push((before.anchors - after.anchors) + ' anchor(s) missing (' + before.anchors + ' → ' + after.anchors + ')');
+    ['dropdowns', 'tables', 'images', 'lists'].forEach(k => { if (after[k] !== before[k]) lost.push(k + ' changed: ' + before[k] + ' → ' + after[k]); });
+    if (Math.abs(after.text - before.text - expText) > 3) lost.push('the text changed by ' + (after.text - before.text) + ' characters (expected ' + expText + ')');
+    say(!bad.length, 'Check 1 · each change: ' + good.length + ' of ' + (good.length + bad.length) + ' confirmed', bad.length ? 'Not there after all: ' + bad.map(esc).join('<br>') : 'Read the boxes again: every change is in place.');
+    say(!lost.length, 'Check 2 · nothing else changed', lost.length ? lost.map(esc).join('<br>') + '<br><b>Don’t save: click Cancel</b> and send a screenshot of this box.' :
+      'Anchors ' + after.anchors + ', dropdowns ' + after.dropdowns + ', tables ' + after.tables + ', images ' + after.images + ', lists ' + after.lists + ': same as before. Text: ' + (after.text - before.text >= 0 ? '+' : '') + (after.text - before.text) + ' characters (from the Contents names).');
+    say(true, 'Next', (bad.length || lost.length ? '<b>Something didn’t go as planned: click Cancel to undo all of it.</b> ' : 'All good. ') + 'Review the boxes, then click <b>Save</b> yourself. Nothing was saved. After you publish, click ↑ Update (or Save this KA’s HTML), then in the dashboard Reload and Check all: it shows what got fixed.');
   }
   let fixBusy = false;
   function fixPanel() {
