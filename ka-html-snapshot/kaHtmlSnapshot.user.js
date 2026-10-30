@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.1.0
+// @version      1.1.1
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 
 /*
- * KA HTML SNAPSHOT v1.1.0
+ * KA HTML SNAPSHOT v1.1.1
  *
  * What it does:
  *   - "Save this KA's HTML": the KA you have open.
@@ -41,7 +41,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
   // Personal copy only: the URL and key can be written here once. On first run they
   // are copied into Tampermonkey's storage, so later updates (which come without
@@ -302,10 +302,16 @@
             to = from.replace(/\/article\/[^?#\/\s)]+/i, '/article/' + s2);
           }
           if (o.op === 'record-url') {
-            const m = from.match(/\/lightning\/r\/Knowledge__kav\/([a-zA-Z0-9]{15,18})\/view(#.*)?/i);
-            let un = ''; try { const r = await uiGet(API + '/records/' + m[1] + '?optionalFields=Knowledge__kav.UrlName'); un = (r.fields && r.fields.UrlName && r.fields.UrlName.value) || ''; } catch (e) { /* below */ }
+            // every KA record id in the address (the link itself and the ?ws= one), and the #section at the end
+            const dec = decodeURIComponent(from), hash = (from.match(/#[^#]*$/) || [''])[0];
+            const recs = [...new Set((dec.match(/Knowledge__kav\/([a-zA-Z0-9]{15,18})/gi) || []).map(x => x.split('/')[1]))];
+            let un = '';
+            for (const rid of recs) { try { const r = await uiGet(API + '/records/' + rid + '?optionalFields=Knowledge__kav.UrlName'); un = (r.fields && r.fields.UrlName && r.fields.UrlName.value) || ''; } catch (e) { /* next */ } if (un) break; }
+            const hasAnchor = hash.length > 1 && all('[id],a[name]').some(e => e.id === hash.slice(1) || e.getAttribute('name') === hash.slice(1));
+            if (!un && hasAnchor) { to = hash; links.forEach(a => { a.setAttribute('href', to); a.removeAttribute('data-mce-href'); a.removeAttribute('target'); touched.add(boxOf(a)); });
+              done.push(o.what + ' → ' + to + ' (that record is gone, but this KA has the ' + hash + ' section: check it’s the right one)'); continue; }
             if (!un) { miss.push(o.what + ' (Salesforce doesn’t know that record anymore: fix it by hand)'); continue; }
-            to = here && String(here.urlName).toLowerCase() === un.toLowerCase() && m[2] ? m[2] : '/articles/Knowledge/' + un + (m[2] || '');
+            to = here && String(here.urlName).toLowerCase() === un.toLowerCase() && hash ? hash : '/articles/Knowledge/' + un + hash;
           }
           links.forEach(a => { a.setAttribute('href', to); a.removeAttribute('data-mce-href'); touched.add(boxOf(a)); });
           done.push(o.what + (o.op === 'href' ? '' : ' → ' + to)); continue;
