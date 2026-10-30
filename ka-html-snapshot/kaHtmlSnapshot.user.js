@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.2.0
+// @version      1.3.0
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 
 /*
- * KA HTML SNAPSHOT v1.2.0
+ * KA HTML SNAPSHOT v1.3.0
  *
  * What it does:
  *   - "Save this KA's HTML": the KA you have open.
@@ -41,7 +41,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
   // Personal copy only: the URL and key can be written here once. On first run they
   // are copied into Tampermonkey's storage, so later updates (which come without
@@ -286,13 +286,33 @@
       return c.length === 1 && s.of === 1 ? c[0] : null;
     };
     // find every target first, so one change doesn't move the next one
-    const ORDER = ['unwrap-toc', 'rename', 'href', 'hc-resolve', 'record-url', 'del-empty', 'no-blank', 'retag', 'del'];
-    const ops = data.ops.slice().sort((a, b) => ORDER.indexOf(a.op) - ORDER.indexOf(b.op)).map(o => ({ o, el: o.sel ? find(o.sel) : null, n0: o.sel ? count(o.sel) : 0 }));
+    const ORDER = ['unwrap-toc', 'rename', 'href', 'hc-resolve', 'record-url', 'repoint', 'add-entry', 'del-entry', 'del-empty', 'no-blank', 'retag', 'del'];
+    const ops = data.ops.slice().sort((a, b) => ORDER.indexOf(a.op) - ORDER.indexOf(b.op)).map(o => ({ o, el: o.sel ? find(o.sel) : o.after ? find(o.after) : null, n0: o.sel ? count(o.sel) : 0 }));
     for (const { o, el } of ops) {
       try {
-        if (o.sel && !el) { miss.push(o.what + ' (not found: it may be fixed already)'); continue; }
+        if ((o.sel || o.after) && !el) { miss.push(o.what + ' (not found: it may be fixed already)'); continue; }
         if (o.op === 'retag') { touched.add(boxOf(el)); retag(el, o.to.toLowerCase()); }
         else if (o.op === 'del') { touched.add(boxOf(el)); el.remove(); }
+        else if (o.op === 'repoint') {
+          const links = all('a[href]').filter(a => a.getAttribute('href') === o.from);
+          if (!links.length) { miss.push(o.what + ' (not found: it may be fixed already)'); continue; }
+          links.forEach(a => { a.setAttribute('href', o.to); a.removeAttribute('data-mce-href'); if (/^#/.test(o.to)) a.removeAttribute('target'); touched.add(boxOf(a)); });
+        }
+        else if (o.op === 'del-entry') {
+          const li = el.closest('li'), bx = boxOf(el);
+          if (li && !li.querySelector('ol,ul') && fxKey(li.textContent) === fxKey(el.textContent)) li.remove(); else el.remove();
+          touched.add(bx);
+        }
+        else if (o.op === 'add-entry') {
+          const li = el.closest('li'); if (!li) { miss.push(o.what + ' (the Contents entry to put it after isn\u2019t in a list)'); continue; }
+          const n = li.cloneNode(true); n.querySelectorAll('ol,ul').forEach(x => x.remove()); n.removeAttribute('id');
+          const a = n.querySelector('a[href^="#"]'); if (!a) { miss.push(o.what + ' (couldn\u2019t copy the entry)'); continue; }
+          a.setAttribute('href', '#' + o.anchor); a.removeAttribute('data-mce-href'); a.removeAttribute('id'); a.removeAttribute('name');
+          const w = n.ownerDocument.createTreeWalker(a, NodeFilter.SHOW_TEXT); let first = null, t;
+          while ((t = w.nextNode())) { if (!t.nodeValue.trim()) continue; if (!first) { first = t; t.nodeValue = o.to; } else t.nodeValue = ''; }
+          const w2 = n.ownerDocument.createTreeWalker(n, NodeFilter.SHOW_TEXT); while ((t = w2.nextNode())) if (!a.contains(t)) t.nodeValue = '';
+          li.after(n); touched.add(boxOf(li));
+        }
         else if (o.op === 'unwrap-toc') {
           const a = el.querySelector('a[href="#contents"]'); if (!a) { miss.push(o.what + ' (not found)'); continue; }
           let top = a; while (top.parentElement && top.parentElement !== el && fxKey(top.parentElement.textContent) === fxKey(a.textContent)) top = top.parentElement;
@@ -354,18 +374,22 @@
       else if (o.op === 'unwrap-toc') { const t = fxKey(o.sel.text.replace(toc, '')); yes = all(o.sel.tag).some(e => fxKey(e.textContent) === t && !e.querySelector('a[href="#contents"]')); }
       else if (o.op === 'rename') yes = all('a').some(e => (e.getAttribute('href') || '') === o.sel.href && fxKey(e.textContent) === fxKey(o.to));
       else if (o.op === 'href' || o.op === 'hc-resolve' || o.op === 'record-url') yes = !all('a[href]').some(e => e.getAttribute('href') === (o.op === 'href' ? o.from : o.href));
+      else if (o.op === 'repoint') yes = !all('a[href]').some(e => e.getAttribute('href') === o.from);
+      else if (o.op === 'del-entry') yes = count(o.sel) === n0 - 1;
+      else if (o.op === 'add-entry') yes = all('a[href="#' + o.anchor + '"]').some(e => fxKey(e.textContent) === fxKey(o.to));
       else if (o.op === 'del-empty') yes = after.emptyLinks === 0;
       else if (o.op === 'no-blank') yes = after.blank === 0;
       (yes ? good : bad).push(o.what);
     }
-    const expText = ops.filter(x => ok.has(x.o) && x.o.op === 'rename').reduce((n, x) => n + fxKey(x.o.to).replace(/\s/g, '').length - x.o.sel.text.replace(/\s/g, '').length, 0);
+    const len = t => fxKey(t).replace(/\s/g, '').length;
+    const expText = ops.filter(x => ok.has(x.o)).reduce((n, x) => n + (x.o.op === 'rename' ? len(x.o.to) - len(x.o.sel.text) : x.o.op === 'add-entry' ? len(x.o.to) : x.o.op === 'del-entry' || (x.o.op === 'del' && x.o.sel.tag === 'A') ? -len(x.o.sel.text) : 0), 0);
     const lost = [];
     if (after.anchors < before.anchors) lost.push((before.anchors - after.anchors) + ' anchor(s) missing (' + before.anchors + ' → ' + after.anchors + ')');
     ['dropdowns', 'tables', 'images', 'lists'].forEach(k => { if (after[k] !== before[k]) lost.push(k + ' changed: ' + before[k] + ' → ' + after[k]); });
     if (Math.abs(after.text - before.text - expText) > 3) lost.push('the text changed by ' + (after.text - before.text) + ' characters (expected ' + expText + ')');
     say(!bad.length, 'Check 1 · each change: ' + good.length + ' of ' + (good.length + bad.length) + ' confirmed', bad.length ? 'Not there after all: ' + bad.map(esc).join('<br>') : 'Read the boxes again: every change is in place.');
     say(!lost.length, 'Check 2 · nothing else changed', lost.length ? lost.map(esc).join('<br>') + '<br><b>Don’t save: click Cancel</b> and send a screenshot of this box.' :
-      'Anchors ' + after.anchors + ', dropdowns ' + after.dropdowns + ', tables ' + after.tables + ', images ' + after.images + ', lists ' + after.lists + ': same as before. Text: ' + (after.text - before.text >= 0 ? '+' : '') + (after.text - before.text) + ' characters (from the Contents names).');
+      'Anchors ' + after.anchors + ', dropdowns ' + after.dropdowns + ', tables ' + after.tables + ', images ' + after.images + ', lists ' + after.lists + ': same as before. Text: ' + (after.text - before.text >= 0 ? '+' : '') + (after.text - before.text) + ' characters (from the names and Contents entries changed).');
     say(true, 'Next', (bad.length || lost.length ? '<b>Something didn’t go as planned: click Cancel to undo all of it.</b> ' : 'All good. ') + 'Review the boxes, then click <b>Save</b> yourself. Nothing was saved. After you publish, click ↑ Update (or Save this KA’s HTML), then in the dashboard Reload and Check all: it shows what got fixed.');
   }
   let fixBusy = false;
