@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.3.1
+// @version      1.3.2
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 
 /*
- * KA HTML SNAPSHOT v1.3.1
+ * KA HTML SNAPSHOT v1.3.2
  *
  * What it does:
  *   - "Save this KA's HTML": the KA you have open.
@@ -41,7 +41,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.3.1';
+  const VERSION = '1.3.2';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
   // Personal copy only: the URL and key can be written here once. On first run they
   // are copied into Tampermonkey's storage, so later updates (which come without
@@ -286,13 +286,14 @@
       return c.length === 1 && s.of === 1 ? c[0] : null;
     };
     // find every target first, so one change doesn't move the next one
-    const ORDER = ['unwrap-toc', 'rename', 'href', 'hc-resolve', 'record-url', 'repoint', 'add-entry', 'del-entry', 'del-empty', 'no-blank', 'retag', 'del'];
+    const ORDER = ['unwrap-toc', 'rename', 'href-one', 'href', 'hc-resolve', 'record-url', 'repoint', 'add-entry', 'del-entry', 'del-empty', 'no-blank', 'retag', 'del'];
     const ops = data.ops.slice().sort((a, b) => ORDER.indexOf(a.op) - ORDER.indexOf(b.op)).map(o => ({ o, el: o.sel ? find(o.sel) : o.after ? find(o.after) : null, n0: o.sel ? count(o.sel) : 0 }));
-    for (const { o, el } of ops) {
+    for (const x of ops) { const { o, el } = x;
       try {
         if ((o.sel || o.after) && !el) { miss.push(o.what + ' (not found: it may be fixed already)'); continue; }
-        if (o.op === 'retag') { touched.add(boxOf(el)); retag(el, o.to.toLowerCase()); }
+        if (o.op === 'retag') { touched.add(boxOf(el)); x.nw = retag(el, o.to.toLowerCase()); }
         else if (o.op === 'del') { touched.add(boxOf(el)); el.remove(); }
+        else if (o.op === 'href-one') { el.setAttribute('href', o.to); el.removeAttribute('data-mce-href'); touched.add(boxOf(el)); }
         else if (o.op === 'repoint') {
           const links = all('a[href]').filter(a => a.getAttribute('href') === o.from);
           if (!links.length) { miss.push(o.what + ' (not found: it may be fixed already)'); continue; }
@@ -370,16 +371,18 @@
     // ---- double check: read the boxes again and confirm each change is really there, and that nothing else was lost ----
     const after = metrics(boxes), bad = [], good = [];
     const toc = /\(\s*table of contents\s*\)/ig;
-    for (const { o, n0 } of ops) {
+    for (const { o, n0, el, nw } of ops) {
       if (!ok.has(o)) continue;
       let yes = true;
-      if (o.op === 'retag') yes = count(o.sel) === n0 - 1 && all(o.to).some(e => fxKey(e.textContent) === o.sel.text);
-      else if (o.op === 'del') yes = count(o.sel) === n0 - 1;
+      // each change is checked on the element it changed (two links with the same text are two separate checks)
+      if (o.op === 'retag') yes = !el.isConnected && !!nw && nw.isConnected && nw.tagName === o.to.toUpperCase() && fxKey(nw.textContent) === o.sel.text;
+      else if (o.op === 'del') yes = !el.isConnected;
       else if (o.op === 'unwrap-toc') { const t = fxKey(o.sel.text.replace(toc, '')); yes = all(o.sel.tag).some(e => fxKey(e.textContent) === t && !e.querySelector('a[href="#contents"]')); }
       else if (o.op === 'rename') yes = all('a').some(e => (e.getAttribute('href') || '') === o.sel.href && fxKey(e.textContent) === fxKey(o.to));
       else if (o.op === 'href' || o.op === 'hc-resolve' || o.op === 'record-url') yes = !all('a[href]').some(e => e.getAttribute('href') === (o.op === 'href' ? o.from : o.href));
+      else if (o.op === 'href-one') yes = el.isConnected && el.getAttribute('href') === o.to;
       else if (o.op === 'repoint') yes = !all('a[href]').some(e => e.getAttribute('href') === o.from);
-      else if (o.op === 'del-entry') yes = count(o.sel) === n0 - 1;
+      else if (o.op === 'del-entry') yes = !el.isConnected;
       else if (o.op === 'add-entry') yes = all('a[href="#' + o.anchor + '"]').some(e => fxKey(e.textContent) === fxKey(o.to));
       else if (o.op === 'del-empty') yes = after.emptyLinks === 0;
       else if (o.op === 'no-blank') yes = after.blank === 0;
