@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         KA HTML Snapshot
 // @namespace    https://thumbtack.com/ka-html-snapshot
-// @version      1.3.2
+// @version      1.4.0
 // @description  Saves the exact Salesforce HTML of KAs (anchors, dropdowns, colors) to the Drive folder "KA HTML - do not edit", for the Content Index Dashboard's KA Checkup. Separate from KA Refresh: it never changes KA Refresh, KA Sync or the KA Docs.
 // @author       jcardona@thumbtack.com
 // @match        https://thumbtack.lightning.force.com/*
@@ -17,7 +17,7 @@
 // ==/UserScript==
 
 /*
- * KA HTML SNAPSHOT v1.3.2
+ * KA HTML SNAPSHOT v1.4.0
  *
  * What it does:
  *   - "Save this KA's HTML": the KA you have open.
@@ -41,7 +41,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const VERSION = '1.3.2';
+  const VERSION = '1.4.0';
   const K_URL = 'KHS_url', K_KEY = 'KHS_key', K_SAVED = 'KHS_saved', K_IDS = 'KHS_urlname_ids';
   // Personal copy only: the URL and key can be written here once. On first run they
   // are copied into Tampermonkey's storage, so later updates (which come without
@@ -286,13 +286,22 @@
       return c.length === 1 && s.of === 1 ? c[0] : null;
     };
     // find every target first, so one change doesn't move the next one
-    const ORDER = ['unwrap-toc', 'rename', 'href-one', 'href', 'hc-resolve', 'record-url', 'repoint', 'add-entry', 'del-entry', 'del-empty', 'no-blank', 'retag', 'del'];
+    const ORDER = ['text', 'unwrap-toc', 'rename', 'href-one', 'href', 'hc-resolve', 'record-url', 'repoint', 'add-entry', 'del-entry', 'del-empty', 'no-blank', 'retag', 'del'];
     const ops = data.ops.slice().sort((a, b) => ORDER.indexOf(a.op) - ORDER.indexOf(b.op)).map(o => ({ o, el: o.sel ? find(o.sel) : o.after ? find(o.after) : null, n0: o.sel ? count(o.sel) : 0 }));
     for (const x of ops) { const { o, el } = x;
       try {
         if ((o.sel || o.after) && !el) { miss.push(o.what + ' (not found: it may be fixed already)'); continue; }
         if (o.op === 'retag') { touched.add(boxOf(el)); x.nw = retag(el, o.to.toLowerCase()); }
         else if (o.op === 'del') { touched.add(boxOf(el)); el.remove(); }
+        else if (o.op === 'text') {
+          // a typo or wording fix: replace the exact phrase wherever it sits inside one piece of text
+          const occ = t => { let n = 0, i = 0; while ((i = t.indexOf(o.find, i)) >= 0) { n++; i += o.find.length; } return n; };
+          x.tot = boxes.reduce((n, b) => n + occ((b.el.textContent || '').replace(/\u00a0/g, ' ')), 0);
+          let k = 0; boxes.forEach(b => { const w = b.el.ownerDocument.createTreeWalker(b.el, NodeFilter.SHOW_TEXT); let t;
+            while ((t = w.nextNode())) { const v = t.nodeValue.replace(/\u00a0/g, ' '); if (!v.includes(o.find)) continue; const parts = v.split(o.find); k += parts.length - 1; t.nodeValue = parts.join(o.to); touched.add(b); } });
+          x.n = k; if (!k) { miss.push(o.what + ' (not found as one piece of text: the words may have different formatting. Fix it by hand)'); continue; }
+          if (o.n && k < o.n) { ok.add(o); done.push(o.what + ' (' + k + ' of ' + o.n + ': the rest have different formatting, fix those by hand)'); continue; }
+        }
         else if (o.op === 'href-one') { el.setAttribute('href', o.to); el.removeAttribute('data-mce-href'); touched.add(boxOf(el)); }
         else if (o.op === 'repoint') {
           const links = all('a[href]').filter(a => a.getAttribute('href') === o.from);
@@ -371,7 +380,7 @@
     // ---- double check: read the boxes again and confirm each change is really there, and that nothing else was lost ----
     const after = metrics(boxes), bad = [], good = [];
     const toc = /\(\s*table of contents\s*\)/ig;
-    for (const { o, n0, el, nw } of ops) {
+    for (const xx of ops) { const { o, n0, el, nw } = xx;
       if (!ok.has(o)) continue;
       let yes = true;
       // each change is checked on the element it changed (two links with the same text are two separate checks)
@@ -380,6 +389,8 @@
       else if (o.op === 'unwrap-toc') { const t = fxKey(o.sel.text.replace(toc, '')); yes = all(o.sel.tag).some(e => fxKey(e.textContent) === t && !e.querySelector('a[href="#contents"]')); }
       else if (o.op === 'rename') yes = all('a').some(e => (e.getAttribute('href') || '') === o.sel.href && fxKey(e.textContent) === fxKey(o.to));
       else if (o.op === 'href' || o.op === 'hc-resolve' || o.op === 'record-url') yes = !all('a[href]').some(e => e.getAttribute('href') === (o.op === 'href' ? o.from : o.href));
+      else if (o.op === 'text') { const occ = t => { let n = 0, i = 0; while ((i = t.indexOf(o.find, i)) >= 0) { n++; i += o.find.length; } return n; };
+        yes = xx.n > 0 && boxes.reduce((n, b) => n + occ((b.el.textContent || '').replace(/\u00a0/g, ' ')), 0) === xx.tot - xx.n; }
       else if (o.op === 'href-one') yes = el.isConnected && el.getAttribute('href') === o.to;
       else if (o.op === 'repoint') yes = !all('a[href]').some(e => e.getAttribute('href') === o.from);
       else if (o.op === 'del-entry') yes = !el.isConnected;
@@ -389,7 +400,7 @@
       (yes ? good : bad).push(o.what);
     }
     const len = t => fxKey(t).replace(/\s/g, '').length;
-    const expText = ops.filter(x => ok.has(x.o)).reduce((n, x) => n + (x.o.op === 'rename' ? len(x.o.to) - len(x.o.sel.text) : x.o.op === 'add-entry' ? len(x.o.to) : x.o.op === 'del-entry' || (x.o.op === 'del' && x.o.sel.tag === 'A') ? -len(x.o.sel.text) : 0), 0);
+    const expText = ops.filter(x => ok.has(x.o)).reduce((n, x) => n + (x.o.op === 'rename' ? len(x.o.to) - len(x.o.sel.text) : x.o.op === 'add-entry' ? len(x.o.to) : x.o.op === 'text' ? (len(x.o.to) - len(x.o.find)) * (x.n || 0) : x.o.op === 'del-entry' || (x.o.op === 'del' && x.o.sel.tag === 'A') ? -len(x.o.sel.text) : 0), 0);
     const lost = [];
     if (after.anchors < before.anchors) lost.push((before.anchors - after.anchors) + ' anchor(s) missing (' + before.anchors + ' → ' + after.anchors + ')');
     ['dropdowns', 'tables', 'images', 'lists'].forEach(k => { if (after[k] !== before[k]) lost.push(k + ' changed: ' + before[k] + ' → ' + after[k]); });
